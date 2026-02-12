@@ -1,0 +1,38 @@
+# =============================================================================
+# Polymarket Agent - Dependencias
+# =============================================================================
+
+# --- Core ---
+python-dotenv>=1.0.0          # Manejo de variables de entorno
+pydantic>=2.10.0              # Validación de datos y modelos
+httpx>=0.27.0                 # Cliente HTTP moderno
+tenacity>=9.0.0               # Reintentos con backoff exponencial
+
+# --- Polymarket ---
+# py-clob-client se instala por separado si se necesita ejecución real
+# Para Fase 1 usamos la API Gamma directamente via httpx
+
+# --- LLM ---
+anthropic>=0.40.0             # SDK de Anthropic (Claude API)
+
+# --- Datos y Noticias ---
+feedparser>=6.0.0             # Parser de RSS feeds
+beautifulsoup4>=4.12.0        # Web scraping
+lxml>=5.0.0                   # Parser XML rápido
+
+# --- Base de datos ---
+aiosqlite>=0.20.0             # SQLite async
+
+# --- Monitoreo ---
+streamlit>=1.40.0             # Dashboard web
+python-telegram-bot>=21.0     # Alertas Telegram
+plotly>=5.24.0                # Gráficos interactivos
+
+# --- Testing ---
+pytest>=8.0.0                 # Framework de testing
+pytest-asyncio>=0.24.0        # Testing async
+pytest-mock>=3.14.0           # Mocking
+
+# --- Utilidades ---
+rich>=13.9.0                  # Salida bonita en consola
+schedule>=1.2.0               # Programación de tareas
