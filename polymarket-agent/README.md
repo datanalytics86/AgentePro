@@ -57,20 +57,26 @@ python scripts/verificar_fase1.py
 # Escanear mercados activos
 python -m core.market_scanner
 
-# Ejecutar tests
+# Iniciar agente en modo paper trading
+python scripts/paper_trade.py
+
+# Dashboard de monitoreo
+streamlit run monitoring/dashboard.py
+
+# Ejecutar tests (93 tests)
 pytest tests/ -v
 ```
 
 ## Fases de Desarrollo
 
 - [x] Fase 1: Conexión y escaneo de mercados
-- [ ] Fase 2: Recopilación de datos y contexto
-- [ ] Fase 3: Motor de evaluación de probabilidades (LLM)
-- [ ] Fase 4: Estrategia de decisión
-- [ ] Fase 5: Gestión de riesgo y portafolio
-- [ ] Fase 6: Motor de ejecución
-- [ ] Fase 7: Monitoreo y alertas
-- [ ] Fase 8: Orquestador y despliegue
+- [x] Fase 2: Recopilación de datos y contexto
+- [x] Fase 3: Motor de evaluación de probabilidades (LLM)
+- [x] Fase 4: Estrategia de decisión
+- [x] Fase 5: Gestión de riesgo y portafolio
+- [x] Fase 6: Motor de ejecución
+- [x] Fase 7: Monitoreo y alertas
+- [x] Fase 8: Orquestador y despliegue
 
 ## Aviso Legal
 
