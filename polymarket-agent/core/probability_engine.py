@@ -1,29 +1,28 @@
 """
-Motor de evaluación de probabilidades usando LLM (Claude).
+Motor de evaluación de probabilidades usando LLM (Claude) — async.
 
 El cerebro del agente: evalúa la probabilidad real de cada evento
 y la compara con el precio del mercado para detectar oportunidades.
 
-Fase 3 del agente autónomo.
+Fase 3 del agente autónomo — refactorizado a asyncio con caché TTL.
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime
 
 from pydantic import ValidationError
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-)
 
 from config import settings
 from core.models import LLMEvaluation, Market
 from core.data_collector import MarketContext
+from core.net_utils import retry_async, TTLCache, RETRIABLE_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
+
+# Caché en memoria para evaluaciones del LLM (60 min TTL)
+_llm_cache = TTLCache(ttl_seconds=3600, max_size=2000, price_threshold=0.02)
 
 # Prompt del sistema para el LLM evaluador
 SYSTEM_PROMPT = """Eres un analista experto en mercados de predicción con formación en \
@@ -134,10 +133,11 @@ def _construir_prompt_usuario(contexto: MarketContext) -> str:
 
 class ProbabilityEngine:
     """
-    Motor de evaluación de probabilidades usando Claude API.
+    Motor de evaluación de probabilidades usando Claude API (async).
 
     Envía contexto estructurado al LLM y parsea la respuesta
-    en formato JSON validado.
+    en formato JSON validado. Usa caché TTL de 60 min para evitar
+    re-evaluar mercados cuyo precio no cambió significativamente.
     """
 
     def __init__(self) -> None:
@@ -145,16 +145,19 @@ class ProbabilityEngine:
         self._client = self._crear_cliente()
         self._evaluaciones_log: list[dict] = []
 
-    def _crear_cliente(self) -> "anthropic.Anthropic":
-        """Crea el cliente de Anthropic con la API key configurada."""
+    def _crear_cliente(self) -> "anthropic.AsyncAnthropic":
+        """Crea el cliente async de Anthropic con la API key configurada."""
         import anthropic
-        return anthropic.Anthropic(api_key=self._config.api_key)
+        return anthropic.AsyncAnthropic(api_key=self._config.api_key)
 
-    def evaluar_mercado(
+    async def evaluar_mercado(
         self, contexto: MarketContext
     ) -> LLMEvaluation | None:
         """
         Evalúa la probabilidad de un mercado usando el LLM.
+
+        Primero consulta el caché TTL. Si no hay hit (o el precio
+        cambió > 2%), llama al LLM y almacena el resultado.
 
         Args:
             contexto: Contexto completo del mercado (datos, noticias, sentimiento).
@@ -162,6 +165,18 @@ class ProbabilityEngine:
         Returns:
             LLMEvaluation con la probabilidad estimada, o None si falla.
         """
+        market_id = contexto.market.condition_id
+        current_price = contexto.market.yes_price
+
+        # Consultar caché
+        cached = _llm_cache.get(market_id, current_price)
+        if cached is not None:
+            logger.info(
+                f"Cache HIT para {market_id[:12]} "
+                f"(stats: {_llm_cache.stats})"
+            )
+            return cached
+
         logger.info(
             f"Evaluando mercado: '{contexto.market.question[:50]}...'"
         )
@@ -169,7 +184,7 @@ class ProbabilityEngine:
         prompt_usuario = _construir_prompt_usuario(contexto)
 
         # Intentar obtener evaluación del LLM con reintentos
-        respuesta_raw = self._llamar_llm(prompt_usuario)
+        respuesta_raw = await self._llamar_llm(prompt_usuario)
 
         if respuesta_raw is None:
             logger.error("No se pudo obtener respuesta del LLM")
@@ -185,6 +200,9 @@ class ProbabilityEngine:
         # Sanity checks
         evaluacion = self._aplicar_sanity_checks(evaluacion, contexto)
 
+        # Almacenar en caché
+        _llm_cache.put(market_id, evaluacion, current_price)
+
         # Loggear para auditoría
         self._registrar_evaluacion(contexto, evaluacion, prompt_usuario)
 
@@ -196,11 +214,11 @@ class ProbabilityEngine:
 
         return evaluacion
 
-    def evaluar_multiples(
+    async def evaluar_multiples(
         self, contextos: list[MarketContext]
     ) -> list[tuple[MarketContext, LLMEvaluation | None]]:
         """
-        Evalúa múltiples mercados secuencialmente.
+        Evalúa múltiples mercados en paralelo con asyncio.gather.
 
         Args:
             contextos: Lista de contextos de mercado.
@@ -208,45 +226,47 @@ class ProbabilityEngine:
         Returns:
             Lista de tuplas (contexto, evaluación).
         """
-        resultados: list[tuple[MarketContext, LLMEvaluation | None]] = []
+        async def _evaluar_uno(
+            ctx: MarketContext,
+        ) -> tuple[MarketContext, LLMEvaluation | None]:
+            evaluacion = await self.evaluar_mercado(ctx)
+            return (ctx, evaluacion)
 
-        for i, ctx in enumerate(contextos, 1):
-            logger.info(f"Evaluando mercado {i}/{len(contextos)}...")
-            evaluacion = self.evaluar_mercado(ctx)
-            resultados.append((ctx, evaluacion))
+        resultados = await asyncio.gather(
+            *[_evaluar_uno(ctx) for ctx in contextos]
+        )
 
         exitosos = sum(1 for _, e in resultados if e is not None)
         logger.info(
-            f"Evaluaciones completadas: {exitosos}/{len(contextos)} exitosas"
+            f"Evaluaciones completadas: {exitosos}/{len(contextos)} exitosas "
+            f"(cache stats: {_llm_cache.stats})"
         )
 
-        return resultados
+        return list(resultados)
 
     @property
     def historial_evaluaciones(self) -> list[dict]:
         """Retorna el historial de evaluaciones para auditoría."""
         return self._evaluaciones_log.copy()
 
+    @property
+    def cache_stats(self) -> dict[str, int]:
+        """Retorna estadísticas del caché."""
+        return _llm_cache.stats
+
     # =========================================================================
     # Métodos privados - LLM
     # =========================================================================
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=15),
-        retry=retry_if_exception_type((Exception,)),
-        before_sleep=lambda retry_state: logger.warning(
-            f"Reintentando llamada LLM (intento {retry_state.attempt_number})..."
-        ),
-    )
-    def _llamar_llm(self, prompt_usuario: str) -> str | None:
+    @retry_async(max_attempts=3, base_delay=2.0, max_delay=15.0)
+    async def _llamar_llm(self, prompt_usuario: str) -> str | None:
         """
-        Llama a la API de Claude y retorna la respuesta como texto.
+        Llama a la API de Claude (async) y retorna la respuesta como texto.
 
         Usa reintentos automáticos con backoff exponencial.
         """
         try:
-            message = self._client.messages.create(
+            message = await self._client.messages.create(
                 model=self._config.model,
                 max_tokens=self._config.max_tokens,
                 temperature=self._config.temperature,
@@ -405,81 +425,3 @@ def _extraer_json(texto: str) -> str | None:
         return texto[inicio : fin + 1]
 
     return None
-
-
-# =============================================================================
-# Ejecución directa para pruebas
-# =============================================================================
-
-def main() -> None:
-    """Prueba el ProbabilityEngine con un mercado de ejemplo."""
-    from config import configurar_logging
-    from core.models import Token
-    from core.data_collector import MarketContext
-    from data.news_fetcher import NewsArticle
-    from data.sentiment import SentimentResult
-    from rich.console import Console
-    from rich.panel import Panel
-
-    configurar_logging()
-    console = Console()
-
-    console.print("\n[bold cyan]Probability Engine - Fase 3[/bold cyan]\n")
-
-    # Crear contexto de ejemplo
-    mercado = Market(
-        condition_id="0x_test_123",
-        question="Will Bitcoin reach $100,000 by December 2026?",
-        description="Market resolves YES if BTC price reaches 100k USD.",
-        tokens=[
-            Token(token_id="tk_yes", outcome="Yes", price=0.65),
-            Token(token_id="tk_no", outcome="No", price=0.35),
-        ],
-        volume_24h=50000,
-        liquidity=100000,
-        yes_price=0.65,
-        no_price=0.35,
-        category="crypto",
-    )
-
-    noticias = [
-        NewsArticle(
-            title="Bitcoin approaching $95k amid institutional demand",
-            source="Reuters",
-            summary="Bitcoin continues to rally with strong buying pressure.",
-            published_date=datetime.now(),
-            relevance_score=0.9,
-        ),
-    ]
-
-    contexto = MarketContext(
-        market=mercado,
-        news_articles=noticias,
-        sentiment=SentimentResult(
-            score=0.3, label="positive", confidence=0.6,
-        ),
-        data_quality="partial",
-    )
-
-    engine = ProbabilityEngine()
-    evaluacion = engine.evaluar_mercado(contexto)
-
-    if evaluacion:
-        edge = evaluacion.probability - mercado.yes_price
-        console.print(Panel(
-            f"Probabilidad estimada: {evaluacion.probability:.2f}\n"
-            f"Confianza: {evaluacion.confidence}\n"
-            f"Precio del mercado: {mercado.yes_price:.2f}\n"
-            f"Edge: {edge:+.2f}\n"
-            f"Razonamiento: {evaluacion.reasoning}\n"
-            f"Factores clave: {', '.join(evaluacion.key_factors)}\n"
-            f"Riesgos: {', '.join(evaluacion.risks_to_thesis)}",
-            title="Evaluación del LLM",
-            border_style="green" if edge > 0 else "red",
-        ))
-    else:
-        console.print("[red]No se pudo obtener evaluación del LLM[/red]")
-
-
-if __name__ == "__main__":
-    main()

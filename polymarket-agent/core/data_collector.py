@@ -1,12 +1,13 @@
 """
-Recopilador de datos integrado para mercados de predicción.
+Recopilador de datos integrado para mercados de predicción (async).
 
 Orquesta la recopilación de noticias, historial de precios y
 análisis de sentimiento para alimentar al motor de probabilidades.
 
-Fase 2 del agente autónomo.
+Fase 2 del agente autónomo — refactorizado a asyncio con recopilación paralela.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -141,11 +142,13 @@ class MarketContext(BaseModel):
 
 class DataCollector:
     """
-    Orquesta la recopilación de datos para mercados de predicción.
+    Orquesta la recopilación de datos para mercados de predicción (async).
 
     Integra NewsFetcher, MarketHistory y SentimentAnalyzer para
     generar un contexto completo que alimentará al motor de
     probabilidades (Fase 3).
+
+    Usa asyncio.gather para recopilar noticias e historial en paralelo.
     """
 
     def __init__(self) -> None:
@@ -153,24 +156,26 @@ class DataCollector:
         self._market_history = MarketHistory()
         self._sentiment_analyzer = SentimentAnalyzer()
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Cierra todas las conexiones."""
-        self._news_fetcher.close()
-        self._market_history.close()
+        await self._news_fetcher.close()
+        await self._market_history.close()
 
-    def __enter__(self) -> "DataCollector":
+    async def __aenter__(self) -> "DataCollector":
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self.close()
+    async def __aexit__(self, *args: object) -> None:
+        await self.close()
 
-    def recopilar_contexto(
+    async def recopilar_contexto(
         self,
         market: Market,
         max_news: int = 10,
     ) -> MarketContext:
         """
         Recopila todo el contexto disponible para un mercado.
+
+        Noticias e historial se obtienen en paralelo con asyncio.gather.
 
         Args:
             market: Mercado para el cual recopilar datos.
@@ -183,16 +188,18 @@ class DataCollector:
             f"Recopilando contexto para: '{market.question[:50]}...'"
         )
 
-        # 1. Buscar noticias
-        articles = self._recopilar_noticias(market, max_news)
+        # Ejecutar noticias e historial en paralelo
+        articles_task = self._recopilar_noticias(market, max_news)
+        history_task = self._recopilar_historial(market)
 
-        # 2. Obtener historial de precios
-        price_history = self._recopilar_historial(market)
+        articles, price_history = await asyncio.gather(
+            articles_task, history_task
+        )
 
-        # 3. Analizar sentimiento de las noticias
+        # Sentimiento se calcula localmente (CPU-bound, instantáneo)
         sentiment = self._analizar_sentimiento(articles, market.question)
 
-        # 4. Evaluar calidad de datos
+        # Evaluar calidad de datos
         data_quality = self._evaluar_calidad(articles, price_history, sentiment)
 
         contexto = MarketContext(
@@ -210,13 +217,15 @@ class DataCollector:
 
         return contexto
 
-    def recopilar_multiples(
+    async def recopilar_multiples(
         self,
         markets: list[Market],
         max_news_per_market: int = 5,
     ) -> list[MarketContext]:
         """
-        Recopila contexto para múltiples mercados.
+        Recopila contexto para múltiples mercados en paralelo.
+
+        Usa asyncio.gather para procesar todos los mercados simultáneamente.
 
         Args:
             markets: Lista de mercados a investigar.
@@ -225,41 +234,39 @@ class DataCollector:
         Returns:
             Lista de contextos, uno por mercado.
         """
-        logger.info(f"Recopilando contexto para {len(markets)} mercados...")
-        contextos: list[MarketContext] = []
+        logger.info(f"Recopilando contexto para {len(markets)} mercados en paralelo...")
 
-        for i, market in enumerate(markets, 1):
-            logger.info(f"Mercado {i}/{len(markets)}: {market.question[:40]}...")
+        async def _recopilar_uno(market: Market) -> MarketContext:
             try:
-                contexto = self.recopilar_contexto(
+                return await self.recopilar_contexto(
                     market, max_news=max_news_per_market
                 )
-                contextos.append(contexto)
             except Exception as e:
                 logger.error(
                     f"Error recopilando datos para '{market.question[:40]}': {e}"
                 )
-                # Crear contexto mínimo con lo que tenemos
-                contextos.append(
-                    MarketContext(
-                        market=market,
-                        data_quality="poor",
-                    )
+                return MarketContext(
+                    market=market,
+                    data_quality="poor",
                 )
 
+        contextos = await asyncio.gather(
+            *[_recopilar_uno(m) for m in markets]
+        )
+
         logger.info(f"Contexto recopilado para {len(contextos)} mercados")
-        return contextos
+        return list(contextos)
 
     # =========================================================================
     # Métodos privados
     # =========================================================================
 
-    def _recopilar_noticias(
+    async def _recopilar_noticias(
         self, market: Market, max_news: int
     ) -> list[NewsArticle]:
         """Busca noticias relevantes para el mercado."""
         try:
-            return self._news_fetcher.buscar_noticias(
+            return await self._news_fetcher.buscar_noticias(
                 question=market.question,
                 category=market.category,
                 max_results=max_news,
@@ -269,7 +276,7 @@ class DataCollector:
             logger.warning(f"Error buscando noticias: {e}")
             return []
 
-    def _recopilar_historial(
+    async def _recopilar_historial(
         self, market: Market
     ) -> MarketHistoryAnalysis | None:
         """Obtiene y analiza el historial de precios."""
@@ -284,7 +291,7 @@ class DataCollector:
             if not token_id:
                 return None
 
-            return self._market_history.analizar_mercado(
+            return await self._market_history.analizar_mercado(
                 condition_id=market.condition_id,
                 token_id=token_id,
                 current_price=market.yes_price,
@@ -338,6 +345,7 @@ class DataCollector:
 
 def main() -> None:
     """Prueba el DataCollector con un mercado de ejemplo."""
+    import asyncio
     from config import configurar_logging
     from core.models import Token
     from rich.console import Console
@@ -346,7 +354,7 @@ def main() -> None:
     configurar_logging()
     console = Console()
 
-    console.print("\n[bold cyan]Data Collector - Fase 2[/bold cyan]\n")
+    console.print("\n[bold cyan]Data Collector - Fase 2 (async)[/bold cyan]\n")
 
     # Crear un mercado de ejemplo
     mercado = Market(
@@ -364,16 +372,19 @@ def main() -> None:
         category="crypto",
     )
 
-    with DataCollector() as collector:
-        contexto = collector.recopilar_contexto(mercado)
+    async def _run() -> None:
+        async with DataCollector() as collector:
+            contexto = await collector.recopilar_contexto(mercado)
 
-        console.print(Panel(
-            contexto.resumen(),
-            title="Resumen del Contexto",
-        ))
+            console.print(Panel(
+                contexto.resumen(),
+                title="Resumen del Contexto",
+            ))
 
-        console.print("\n[bold]Texto para el LLM:[/bold]")
-        console.print(contexto.generar_resumen_para_llm())
+            console.print("\n[bold]Texto para el LLM:[/bold]")
+            console.print(contexto.generar_resumen_para_llm())
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

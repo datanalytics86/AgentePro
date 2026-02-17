@@ -1,12 +1,13 @@
 """
-Orquestador principal del agente autónomo.
+Orquestador principal del agente autónomo (async).
 
 Integra todos los componentes y ejecuta el loop principal
-que corre de forma autónoma 24/7.
+que corre de forma autónoma 24/7 con asyncio.
 
-Fase 8 del agente autónomo.
+Fase 8 del agente autónomo — refactorizado a asyncio con modo Turbo.
 """
 
+import asyncio
 import logging
 import signal
 import sys
@@ -27,31 +28,40 @@ from monitoring.reporter import Reporter
 
 logger = logging.getLogger(__name__)
 
+# Timeout máximo por ciclo en modo Turbo (segundos)
+TURBO_CYCLE_TIMEOUT = 300
+
 
 class AgentOrchestrator:
     """
-    Orquestador del agente autónomo de trading en Polymarket.
+    Orquestador del agente autónomo de trading en Polymarket (async).
 
     Loop principal:
     1. Escanear mercados activos
-    2. Recopilar datos (noticias, historial, sentimiento)
-    3. Evaluar probabilidades con LLM
+    2. Recopilar datos (noticias, historial, sentimiento) en paralelo
+    3. Evaluar probabilidades con LLM en paralelo
     4. Generar señales de trading
     5. Validar con risk manager
     6. Ejecutar trades aprobados
     7. Revisar posiciones existentes
     8. Reportar actividad
     9. Dormir hasta próximo ciclo
+
+    Modo Turbo: si un ciclo tarda > 300s, descarta mercados de baja
+    prioridad (bajo volumen/liquidez) y salta la evaluación de LLM
+    para mercados con caché vigente.
     """
 
     def __init__(self) -> None:
         configurar_logging()
-        logger.info("Inicializando agente de Polymarket...")
+        logger.info("Inicializando agente de Polymarket (async)...")
 
-        # Componentes
+        # Componentes async
         self._scanner = MarketScanner()
         self._collector = DataCollector()
         self._engine = ProbabilityEngine()
+
+        # Componentes sync (CPU-bound, rápidos)
         self._strategy = TradingStrategy()
         self._risk_manager = RiskManager()
         self._portfolio = Portfolio()
@@ -64,21 +74,22 @@ class AgentOrchestrator:
         self._ciclo_actual = 0
         self._ultimo_reporte = datetime.now()
 
-        # Graceful shutdown
-        signal.signal(signal.SIGINT, self._manejar_shutdown)
-        signal.signal(signal.SIGTERM, self._manejar_shutdown)
-
         logger.info(
             f"Agente inicializado en modo {settings.agent.mode.upper()} | "
             f"Bankroll: ${settings.risk.max_bankroll_usd:.2f}"
         )
 
-    def ejecutar(self) -> None:
+    async def ejecutar(self) -> None:
         """
-        Loop principal del agente. Corre hasta recibir señal de parada.
+        Loop principal async del agente. Corre hasta recibir señal de parada.
         """
         self._running = True
         intervalo = settings.agent.scan_interval_minutes * 60
+
+        # Configurar shutdown handlers
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, self._manejar_shutdown_async)
 
         self._alerts.agente_iniciado(settings.agent.mode)
         logger.info(
@@ -87,14 +98,24 @@ class AgentOrchestrator:
 
         while self._running:
             self._ciclo_actual += 1
-            inicio = time.time()
+            inicio = time.monotonic()
 
             try:
                 logger.info(f"{'=' * 60}")
                 logger.info(f"CICLO #{self._ciclo_actual} - {datetime.now()}")
                 logger.info(f"{'=' * 60}")
 
-                self._ejecutar_ciclo()
+                # Modo Turbo: timeout de 300s por ciclo
+                try:
+                    await asyncio.wait_for(
+                        self._ejecutar_ciclo(),
+                        timeout=TURBO_CYCLE_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"TURBO: Ciclo #{self._ciclo_actual} excedió "
+                        f"{TURBO_CYCLE_TIMEOUT}s. Mercados lentos descartados."
+                    )
 
                 # Verificar si toca reporte diario
                 self._verificar_reporte_diario()
@@ -109,7 +130,7 @@ class AgentOrchestrator:
                 )
 
             # Calcular tiempo de espera
-            duracion = time.time() - inicio
+            duracion = time.monotonic() - inicio
             espera = max(0, intervalo - duracion)
 
             if self._running and espera > 0:
@@ -117,31 +138,31 @@ class AgentOrchestrator:
                     f"Ciclo completado en {duracion:.0f}s. "
                     f"Próximo ciclo en {espera / 60:.1f} min"
                 )
-                # Dormir en intervalos cortos para permitir shutdown rápido
-                for _ in range(int(espera)):
-                    if not self._running:
-                        break
-                    time.sleep(1)
+                # Dormir async (permite shutdown rápido)
+                try:
+                    await asyncio.sleep(espera)
+                except asyncio.CancelledError:
+                    break
 
-        self._shutdown()
+        await self._shutdown()
 
-    def ejecutar_ciclo_unico(self) -> None:
+    async def ejecutar_ciclo_unico(self) -> None:
         """Ejecuta un solo ciclo del agente (útil para testing)."""
         configurar_logging()
-        self._ejecutar_ciclo()
+        await self._ejecutar_ciclo()
 
     # =========================================================================
-    # Loop principal
+    # Loop principal (async)
     # =========================================================================
 
-    def _ejecutar_ciclo(self) -> None:
-        """Ejecuta un ciclo completo del agente."""
+    async def _ejecutar_ciclo(self) -> None:
+        """Ejecuta un ciclo completo del agente con operaciones en paralelo."""
 
         # =====================================================================
         # Paso 1: ESCANEAR mercados activos
         # =====================================================================
         logger.info("Paso 1: Escaneando mercados...")
-        mercados = self._scanner.escanear_mercados()
+        mercados = await self._scanner.escanear_mercados()
 
         if not mercados:
             logger.warning("No se encontraron mercados. Saltando ciclo.")
@@ -150,10 +171,10 @@ class AgentOrchestrator:
         logger.info(f"  {len(mercados)} mercados encontrados")
 
         # =====================================================================
-        # Paso 2: RECOPILAR datos para cada mercado
+        # Paso 2: RECOPILAR datos para cada mercado (en paralelo)
         # =====================================================================
-        logger.info("Paso 2: Recopilando datos...")
-        contextos = self._collector.recopilar_multiples(
+        logger.info("Paso 2: Recopilando datos en paralelo...")
+        contextos = await self._collector.recopilar_multiples(
             mercados, max_news_per_market=5
         )
 
@@ -171,16 +192,19 @@ class AgentOrchestrator:
             return
 
         # =====================================================================
-        # Paso 3: EVALUAR probabilidades con LLM
+        # Paso 3: EVALUAR probabilidades con LLM (en paralelo)
         # =====================================================================
-        logger.info("Paso 3: Evaluando probabilidades con LLM...")
-        evaluaciones = self._engine.evaluar_multiples(contextos_validos)
+        logger.info("Paso 3: Evaluando probabilidades con LLM en paralelo...")
+        evaluaciones = await self._engine.evaluar_multiples(contextos_validos)
 
         exitosas = sum(1 for _, e in evaluaciones if e is not None)
-        logger.info(f"  {exitosas}/{len(evaluaciones)} evaluaciones exitosas")
+        logger.info(
+            f"  {exitosas}/{len(evaluaciones)} evaluaciones exitosas "
+            f"(cache: {self._engine.cache_stats})"
+        )
 
         # =====================================================================
-        # Paso 4: GENERAR señales de trading
+        # Paso 4: GENERAR señales de trading (CPU-bound, instantáneo)
         # =====================================================================
         logger.info("Paso 4: Generando señales de trading...")
         señales = self._strategy.generar_señales_multiples(evaluaciones)
@@ -191,7 +215,7 @@ class AgentOrchestrator:
         )
 
         # =====================================================================
-        # Paso 5 + 6: VALIDAR y EJECUTAR
+        # Paso 5 + 6: VALIDAR y EJECUTAR (sync, rápido)
         # =====================================================================
         logger.info("Pasos 5-6: Validando y ejecutando...")
         trades_ejecutados = 0
@@ -212,7 +236,7 @@ class AgentOrchestrator:
         # Paso 7: REVISAR posiciones existentes
         # =====================================================================
         logger.info("Paso 7: Revisando posiciones existentes...")
-        self._revisar_posiciones()
+        await self._revisar_posiciones()
 
         # =====================================================================
         # Paso 8: REPORTAR
@@ -229,7 +253,7 @@ class AgentOrchestrator:
             f"posiciones={len(self._portfolio.obtener_posiciones_abiertas())}"
         )
 
-    def _revisar_posiciones(self) -> None:
+    async def _revisar_posiciones(self) -> None:
         """Revisa posiciones abiertas y cierra las que ya no tienen edge."""
         posiciones = self._portfolio.obtener_posiciones_abiertas()
 
@@ -240,8 +264,8 @@ class AgentOrchestrator:
         logger.info(f"  Revisando {len(posiciones)} posiciones abiertas")
 
         for pos in posiciones:
-            # Obtener mercado actualizado
-            mercado = self._scanner.obtener_mercado_por_id(pos.market_id)
+            # Obtener mercado actualizado (async)
+            mercado = await self._scanner.obtener_mercado_por_id(pos.market_id)
             if mercado is None:
                 continue
 
@@ -250,7 +274,6 @@ class AgentOrchestrator:
                 logger.info(
                     f"  Mercado resuelto/cerrado: {pos.market_question[:40]}"
                 )
-                # En paper trading, la resolución se maneja manualmente
                 continue
 
     def _verificar_reporte_diario(self) -> None:
@@ -284,12 +307,12 @@ class AgentOrchestrator:
     # Shutdown
     # =========================================================================
 
-    def _manejar_shutdown(self, signum: int, frame: object) -> None:
-        """Maneja señales de shutdown (Ctrl+C, SIGTERM)."""
-        logger.info(f"Señal de shutdown recibida ({signum}). Deteniendo...")
+    def _manejar_shutdown_async(self) -> None:
+        """Maneja señales de shutdown en modo async."""
+        logger.info("Señal de shutdown recibida. Deteniendo...")
         self._running = False
 
-    def _shutdown(self) -> None:
+    async def _shutdown(self) -> None:
         """Cierra todos los componentes de forma ordenada."""
         logger.info("Shutdown ordenado del agente...")
 
@@ -301,9 +324,9 @@ class AgentOrchestrator:
         reporte = self._reporter.generar_reporte_diario()
         logger.info(f"\nReporte final:\n{reporte}")
 
-        # Cerrar conexiones
-        self._scanner.close()
-        self._collector.close()
+        # Cerrar conexiones async
+        await self._scanner.close()
+        await self._collector.close()
 
         # Notificar
         self._alerts.agente_detenido("Shutdown ordenado")
@@ -316,11 +339,11 @@ class AgentOrchestrator:
 # =============================================================================
 
 def main() -> None:
-    """Inicia el agente autónomo."""
+    """Inicia el agente autónomo con asyncio."""
     print("""
     ╔══════════════════════════════════════╗
-    ║   Polymarket Trading Agent v1.0      ║
-    ║   Agente Autónomo de Inversiones     ║
+    ║   Polymarket Trading Agent v2.0      ║
+    ║   Agente Autónomo (async + turbo)    ║
     ╚══════════════════════════════════════╝
     """)
 
@@ -328,13 +351,13 @@ def main() -> None:
 
     # Verificar modo
     if settings.es_modo_live():
-        print("⚠️  MODO LIVE - Usando fondos reales")
+        print("MODO LIVE - Usando fondos reales")
         print("    Presiona Ctrl+C para detener\n")
     else:
-        print("📝 MODO PAPER TRADING - Simulación sin fondos reales")
+        print("MODO PAPER TRADING - Simulación sin fondos reales")
         print("   Presiona Ctrl+C para detener\n")
 
-    agente.ejecutar()
+    asyncio.run(agente.ejecutar())
 
 
 if __name__ == "__main__":

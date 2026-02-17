@@ -1,12 +1,13 @@
 """
-Recopilador de noticias relevantes para mercados de predicción.
+Recopilador de noticias relevantes para mercados de predicción (async).
 
 Busca noticias recientes relacionadas con el tema de cada mercado
 usando RSS feeds de medios internacionales y búsqueda web.
 
-Fase 2 del agente autónomo.
+Fase 2 del agente autónomo — refactorizado a asyncio con feeds en paralelo.
 """
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta
@@ -14,14 +15,9 @@ from typing import Any
 
 import httpx
 from pydantic import BaseModel, Field
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-)
 
 from config import settings
+from core.net_utils import retry_async, RETRIABLE_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +70,7 @@ CATEGORY_FEEDS: dict[str, list[str]] = {
 
 class NewsFetcher:
     """
-    Recopila noticias relevantes para un mercado de predicción.
+    Recopila noticias relevantes para un mercado de predicción (async).
 
     Estrategia de búsqueda:
     1. Busca noticias en Google News RSS con la pregunta del mercado
@@ -82,10 +78,11 @@ class NewsFetcher:
     3. Filtra y ordena por relevancia
 
     No requiere API keys - usa solo feeds RSS públicos.
+    Todos los feeds se descargan en paralelo con asyncio.gather.
     """
 
     def __init__(self) -> None:
-        self._client = httpx.Client(
+        self._client = httpx.AsyncClient(
             timeout=settings.scanner.http_timeout_seconds,
             headers={
                 "User-Agent": (
@@ -97,17 +94,17 @@ class NewsFetcher:
             follow_redirects=True,
         )
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Cierra el cliente HTTP."""
-        self._client.close()
+        await self._client.aclose()
 
-    def __enter__(self) -> "NewsFetcher":
+    async def __aenter__(self) -> "NewsFetcher":
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self.close()
+    async def __aexit__(self, *args: object) -> None:
+        await self.close()
 
-    def buscar_noticias(
+    async def buscar_noticias(
         self,
         question: str,
         category: str = "",
@@ -116,6 +113,8 @@ class NewsFetcher:
     ) -> list[NewsArticle]:
         """
         Busca noticias relevantes para una pregunta de mercado.
+
+        Descarga todos los feeds en paralelo con asyncio.gather.
 
         Args:
             question: Pregunta del mercado (e.g., "Will Bitcoin reach $100k?").
@@ -127,25 +126,41 @@ class NewsFetcher:
             Lista de artículos ordenados por relevancia.
         """
         logger.info(f"Buscando noticias para: '{question[:60]}...'")
-        todas_las_noticias: list[NewsArticle] = []
 
-        # 1. Buscar en Google News RSS con la pregunta como query
+        # Preparar todas las tareas de fetching en paralelo
+        tareas: list[asyncio.Task] = []
         keywords = self._extraer_keywords(question)
-        noticias_google = self._buscar_google_news(keywords)
-        todas_las_noticias.extend(noticias_google)
 
-        # 2. Buscar en feeds de categoría
+        # 1. Google News RSS
+        query = "+".join(keywords[:5])
+        google_url = f"https://news.google.com/rss/search?q={query}&hl=en&gl=US&ceid=US:en"
+        tareas.append(asyncio.ensure_future(
+            self._parsear_feed(google_url, "Google News")
+        ))
+
+        # 2. Feeds de categoría
         if category:
             feeds_categoria = CATEGORY_FEEDS.get(category.lower(), [])
             for feed_url in feeds_categoria:
-                noticias = self._parsear_feed(feed_url, f"RSS-{category}")
-                todas_las_noticias.extend(noticias)
+                tareas.append(asyncio.ensure_future(
+                    self._parsear_feed(feed_url, f"RSS-{category}")
+                ))
 
-        # 3. Buscar en feeds generales (si no tenemos suficientes)
-        if len(todas_las_noticias) < max_results:
-            for nombre, url in list(RSS_FEEDS.items())[:3]:
-                noticias = self._parsear_feed(url, nombre)
-                todas_las_noticias.extend(noticias)
+        # 3. Feeds generales (primeros 3)
+        for nombre, url in list(RSS_FEEDS.items())[:3]:
+            tareas.append(asyncio.ensure_future(
+                self._parsear_feed(url, nombre)
+            ))
+
+        # Ejecutar todos los fetches en paralelo
+        resultados = await asyncio.gather(*tareas, return_exceptions=True)
+
+        todas_las_noticias: list[NewsArticle] = []
+        for resultado in resultados:
+            if isinstance(resultado, list):
+                todas_las_noticias.extend(resultado)
+            elif isinstance(resultado, Exception):
+                logger.debug(f"Feed falló: {resultado}")
 
         # 4. Filtrar por fecha
         fecha_limite = datetime.now() - timedelta(days=days_back)
@@ -165,29 +180,19 @@ class NewsFetcher:
         # 6. Deduplicar por título similar
         noticias_unicas = self._deduplicar(noticias_recientes)
 
-        resultado = noticias_unicas[:max_results]
+        resultado_final = noticias_unicas[:max_results]
         logger.info(
-            f"Noticias encontradas: {len(resultado)} "
+            f"Noticias encontradas: {len(resultado_final)} "
             f"(de {len(todas_las_noticias)} totales)"
         )
-        return resultado
+        return resultado_final
 
     # =========================================================================
     # Métodos de búsqueda
     # =========================================================================
 
-    def _buscar_google_news(self, keywords: list[str]) -> list[NewsArticle]:
-        """Busca en Google News RSS usando keywords."""
-        query = "+".join(keywords[:5])  # Máximo 5 keywords
-        url = f"https://news.google.com/rss/search?q={query}&hl=en&gl=US&ceid=US:en"
-        return self._parsear_feed(url, "Google News")
-
-    @retry(
-        stop=stop_after_attempt(2),
-        wait=wait_exponential(multiplier=1, min=1, max=5),
-        retry=retry_if_exception_type((httpx.ConnectError, httpx.ReadTimeout)),
-    )
-    def _parsear_feed(
+    @retry_async(max_attempts=2, base_delay=1.0, max_delay=5.0)
+    async def _parsear_feed(
         self, feed_url: str, source_name: str
     ) -> list[NewsArticle]:
         """
@@ -199,7 +204,7 @@ class NewsFetcher:
         noticias: list[NewsArticle] = []
 
         try:
-            respuesta = self._client.get(feed_url)
+            respuesta = await self._client.get(feed_url)
             respuesta.raise_for_status()
 
             noticias = self._parsear_xml_rss(
@@ -384,6 +389,7 @@ class NewsFetcher:
 
 def main() -> None:
     """Prueba el NewsFetcher con una pregunta de ejemplo."""
+    import asyncio
     from config import configurar_logging
     from rich.console import Console
     from rich.table import Table
@@ -391,36 +397,39 @@ def main() -> None:
     configurar_logging()
     console = Console()
 
-    console.print("\n[bold cyan]News Fetcher - Fase 2[/bold cyan]\n")
+    console.print("\n[bold cyan]News Fetcher - Fase 2 (async)[/bold cyan]\n")
 
-    with NewsFetcher() as fetcher:
-        noticias = fetcher.buscar_noticias(
-            question="Will Bitcoin reach $100k by end of 2026?",
-            category="crypto",
-            max_results=10,
-        )
-
-        if not noticias:
-            console.print("[red]No se encontraron noticias.[/red]")
-            return
-
-        tabla = Table(title=f"Noticias ({len(noticias)})", show_lines=True)
-        tabla.add_column("Relevancia", justify="center", width=10)
-        tabla.add_column("Fuente", width=15)
-        tabla.add_column("Título", max_width=60)
-        tabla.add_column("Fecha", width=12)
-
-        for n in noticias:
-            fecha = n.published_date.strftime("%Y-%m-%d") if n.published_date else "N/A"
-            score_bar = "=" * int(n.relevance_score * 10)
-            tabla.add_row(
-                f"{n.relevance_score:.1%} {score_bar}",
-                n.source,
-                n.title[:60],
-                fecha,
+    async def _run() -> None:
+        async with NewsFetcher() as fetcher:
+            noticias = await fetcher.buscar_noticias(
+                question="Will Bitcoin reach $100k by end of 2026?",
+                category="crypto",
+                max_results=10,
             )
 
-        console.print(tabla)
+            if not noticias:
+                console.print("[red]No se encontraron noticias.[/red]")
+                return
+
+            tabla = Table(title=f"Noticias ({len(noticias)})", show_lines=True)
+            tabla.add_column("Relevancia", justify="center", width=10)
+            tabla.add_column("Fuente", width=15)
+            tabla.add_column("Título", max_width=60)
+            tabla.add_column("Fecha", width=12)
+
+            for n in noticias:
+                fecha = n.published_date.strftime("%Y-%m-%d") if n.published_date else "N/A"
+                score_bar = "=" * int(n.relevance_score * 10)
+                tabla.add_row(
+                    f"{n.relevance_score:.1%} {score_bar}",
+                    n.source,
+                    n.title[:60],
+                    fecha,
+                )
+
+            console.print(tabla)
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

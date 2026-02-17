@@ -1,10 +1,10 @@
 """
-Historial de precios de mercados en Polymarket.
+Historial de precios de mercados en Polymarket (async).
 
 Obtiene y analiza datos históricos de precios para identificar
 tendencias y movimientos bruscos.
 
-Fase 2 del agente autónomo.
+Fase 2 del agente autónomo — refactorizado a asyncio.
 """
 
 import logging
@@ -13,14 +13,9 @@ from enum import Enum
 
 import httpx
 from pydantic import BaseModel, Field
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-)
 
 from config import settings
+from core.net_utils import retry_async, RETRIABLE_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +92,7 @@ class MarketHistoryAnalysis(BaseModel):
 
 class MarketHistory:
     """
-    Obtiene y analiza el historial de precios de mercados en Polymarket.
+    Obtiene y analiza el historial de precios de mercados en Polymarket (async).
 
     Usa la API CLOB para obtener datos de precio y calcula tendencias,
     volatilidad y detecta movimientos bruscos.
@@ -111,22 +106,22 @@ class MarketHistory:
     def __init__(self) -> None:
         self._clob_url = settings.polymarket.api_url
         self._gamma_url = settings.polymarket.gamma_api_url
-        self._client = httpx.Client(
+        self._client = httpx.AsyncClient(
             timeout=settings.scanner.http_timeout_seconds,
             headers={"Accept": "application/json"},
         )
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Cierra el cliente HTTP."""
-        self._client.close()
+        await self._client.aclose()
 
-    def __enter__(self) -> "MarketHistory":
+    async def __aenter__(self) -> "MarketHistory":
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self.close()
+    async def __aexit__(self, *args: object) -> None:
+        await self.close()
 
-    def analizar_mercado(
+    async def analizar_mercado(
         self,
         condition_id: str,
         token_id: str,
@@ -146,7 +141,7 @@ class MarketHistory:
         logger.info(f"Analizando historial de mercado {condition_id[:12]}...")
 
         # Obtener historial de precios de la API
-        history = self._obtener_historial_precios(condition_id, token_id)
+        history = await self._obtener_historial_precios(condition_id, token_id)
 
         if not history:
             logger.warning(
@@ -200,12 +195,8 @@ class MarketHistory:
     # Obtención de datos
     # =========================================================================
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((httpx.ConnectError, httpx.ReadTimeout)),
-    )
-    def _obtener_historial_precios(
+    @retry_async(max_attempts=3, base_delay=2.0, max_delay=10.0)
+    async def _obtener_historial_precios(
         self, condition_id: str, token_id: str
     ) -> list[PricePoint]:
         """
@@ -219,7 +210,7 @@ class MarketHistory:
         try:
             url = f"{self._gamma_url}/markets/{condition_id}/timeseries"
             params = {"interval": "1h", "fidelity": 60}  # Intervalos de 1h
-            respuesta = self._client.get(url, params=params)
+            respuesta = await self._client.get(url, params=params)
 
             if respuesta.status_code == 200:
                 data = respuesta.json()
@@ -236,7 +227,7 @@ class MarketHistory:
                     "interval": "1h",
                     "fidelity": 60,
                 }
-                respuesta = self._client.get(url, params=params)
+                respuesta = await self._client.get(url, params=params)
 
                 if respuesta.status_code == 200:
                     data = respuesta.json()
@@ -412,22 +403,26 @@ class MarketHistory:
 
 def main() -> None:
     """Prueba el MarketHistory con datos de ejemplo."""
+    import asyncio
     from config import configurar_logging
     from rich.console import Console
 
     configurar_logging()
     console = Console()
 
-    console.print("\n[bold cyan]Market History - Fase 2[/bold cyan]\n")
+    console.print("\n[bold cyan]Market History - Fase 2 (async)[/bold cyan]\n")
 
-    with MarketHistory() as mh:
-        # Test con un mercado real (necesita acceso a la API)
-        analysis = mh.analizar_mercado(
-            condition_id="0x_example",
-            token_id="token_example",
-            current_price=0.65,
-        )
-        console.print(analysis.resumen())
+    async def _run() -> None:
+        async with MarketHistory() as mh:
+            # Test con un mercado real (necesita acceso a la API)
+            analysis = await mh.analizar_mercado(
+                condition_id="0x_example",
+                token_id="token_example",
+                current_price=0.65,
+            )
+            console.print(analysis.resumen())
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

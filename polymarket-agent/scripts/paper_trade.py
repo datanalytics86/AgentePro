@@ -2,7 +2,7 @@
 Script para iniciar el agente en modo paper trading.
 
 Ejecuta el agente con fondos simulados para validar el sistema
-antes de usar dinero real.
+antes de usar dinero real. Usa asyncio.run() para el loop async.
 
 Uso:
     python scripts/paper_trade.py

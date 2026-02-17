@@ -4,7 +4,7 @@ Tracking de portafolio con persistencia en SQLite.
 Mantiene registro de todas las posiciones, trades y métricas
 de performance. Sobrevive a reinicios del agente.
 
-Fase 5 del agente autónomo.
+Fase 5 del agente autónomo — optimizado con WAL mode.
 """
 
 import logging
@@ -56,6 +56,9 @@ class Portfolio:
     """
     Gestor de portafolio con persistencia en SQLite.
 
+    Optimizado con WAL mode para lecturas no-bloqueantes
+    que permiten al Dashboard consultar sin frenar al agente.
+
     Funcionalidades:
     - Registrar trades ejecutados
     - Trackear posiciones abiertas
@@ -70,8 +73,14 @@ class Portfolio:
         self._init_db()
 
     def _init_db(self) -> None:
-        """Inicializa las tablas de la base de datos."""
+        """Inicializa las tablas de la base de datos con WAL mode."""
         with sqlite3.connect(self._db_path) as conn:
+            # Optimización: WAL mode para lecturas no-bloqueantes
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA cache_size=-8000")  # 8MB cache
+            conn.execute("PRAGMA temp_store=MEMORY")
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
                     trade_id TEXT PRIMARY KEY,
@@ -112,7 +121,29 @@ class Portfolio:
                     timestamp TEXT NOT NULL
                 )
             """)
+
+            # Índices para consultas rápidas del Dashboard
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_trades_market
+                ON trades(market_id)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_trades_created
+                ON trades(created_at)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_trades_status
+                ON trades(status, resolved_at)
+            """)
+
             conn.commit()
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """Crea una conexión con WAL mode habilitado."""
+        conn = sqlite3.connect(self._db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
 
     # =========================================================================
     # Registro de trades
@@ -160,7 +191,7 @@ class Portfolio:
             created_at=now,
         )
 
-        with sqlite3.connect(self._db_path) as conn:
+        with self._get_conn() as conn:
             conn.execute(
                 """INSERT INTO trades
                 (trade_id, market_id, market_question, side, action,
@@ -206,7 +237,7 @@ class Portfolio:
         pnl_total = 0.0
         now = datetime.now().isoformat()
 
-        with sqlite3.connect(self._db_path) as conn:
+        with self._get_conn() as conn:
             for trade in buys:
                 # PnL = (precio_cierre - precio_entrada) * shares
                 if side == "YES":
@@ -234,7 +265,7 @@ class Portfolio:
 
     def obtener_posiciones_abiertas(self) -> list[Position]:
         """Retorna todas las posiciones abiertas (compras sin cerrar)."""
-        with sqlite3.connect(self._db_path) as conn:
+        with self._get_conn() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """SELECT market_id, market_question, side, price,
@@ -266,7 +297,7 @@ class Portfolio:
 
     def obtener_trades_por_mercado(self, market_id: str) -> list[dict]:
         """Retorna todos los trades de un mercado."""
-        with sqlite3.connect(self._db_path) as conn:
+        with self._get_conn() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM trades WHERE market_id = ? ORDER BY created_at",
@@ -276,7 +307,7 @@ class Portfolio:
 
     def obtener_trades_recientes(self, limit: int = 20) -> list[dict]:
         """Retorna los trades más recientes."""
-        with sqlite3.connect(self._db_path) as conn:
+        with self._get_conn() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM trades ORDER BY created_at DESC LIMIT ?",
@@ -312,7 +343,7 @@ class Portfolio:
     def calcular_perdida_diaria(self) -> float:
         """Pérdida acumulada hoy (positivo = pérdida)."""
         hoy = datetime.now().strftime("%Y-%m-%d")
-        with sqlite3.connect(self._db_path) as conn:
+        with self._get_conn() as conn:
             result = conn.execute(
                 """SELECT COALESCE(SUM(pnl), 0) FROM trades
                    WHERE resolved_at LIKE ? AND pnl < 0""",
@@ -323,7 +354,7 @@ class Portfolio:
     def calcular_perdida_semanal(self) -> float:
         """Pérdida acumulada esta semana."""
         hace_7d = (datetime.now() - timedelta(days=7)).isoformat()
-        with sqlite3.connect(self._db_path) as conn:
+        with self._get_conn() as conn:
             result = conn.execute(
                 """SELECT COALESCE(SUM(pnl), 0) FROM trades
                    WHERE resolved_at > ? AND pnl < 0""",
@@ -337,7 +368,7 @@ class Portfolio:
 
     def calcular_metricas(self) -> PerformanceMetrics:
         """Calcula las métricas de performance del portafolio."""
-        with sqlite3.connect(self._db_path) as conn:
+        with self._get_conn() as conn:
             conn.row_factory = sqlite3.Row
 
             # Trades cerrados
@@ -379,7 +410,7 @@ class Portfolio:
 
     def registrar_balance(self, balance: float) -> None:
         """Registra el balance actual para tracking histórico."""
-        with sqlite3.connect(self._db_path) as conn:
+        with self._get_conn() as conn:
             conn.execute(
                 "INSERT INTO balance_history (balance, timestamp) VALUES (?, ?)",
                 (balance, datetime.now().isoformat()),
@@ -388,7 +419,7 @@ class Portfolio:
 
     def obtener_historial_balance(self, limit: int = 100) -> list[dict]:
         """Retorna el historial de balance."""
-        with sqlite3.connect(self._db_path) as conn:
+        with self._get_conn() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM balance_history ORDER BY timestamp DESC LIMIT ?",

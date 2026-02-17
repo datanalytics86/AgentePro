@@ -1,10 +1,10 @@
 """
-Escáner de mercados de Polymarket.
+Escáner de mercados de Polymarket (async).
 
 Se conecta a la API Gamma de Polymarket para descubrir mercados activos
 y los filtra según criterios configurables de liquidez, volumen y tiempo.
 
-Fase 1 del agente autónomo.
+Fase 1 del agente autónomo — refactorizado a asyncio para rendimiento.
 """
 
 import json
@@ -12,22 +12,17 @@ import logging
 from datetime import datetime, timezone
 
 import httpx
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-)
 
 from config import settings
 from core.models import Market, Token
+from core.net_utils import retry_async, RETRIABLE_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
 
 class MarketScanner:
     """
-    Escáner de mercados activos en Polymarket.
+    Escáner de mercados activos en Polymarket (async).
 
     Usa la API Gamma (pública, sin autenticación) para descubrir mercados
     y los filtra según los criterios definidos en ScannerConfig.
@@ -36,26 +31,26 @@ class MarketScanner:
     def __init__(self) -> None:
         self._gamma_url = settings.polymarket.gamma_api_url
         self._config = settings.scanner
-        self._client = httpx.Client(
+        self._client = httpx.AsyncClient(
             timeout=self._config.http_timeout_seconds,
             headers={"Accept": "application/json"},
         )
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Cierra el cliente HTTP."""
-        self._client.close()
+        await self._client.aclose()
 
-    def __enter__(self) -> "MarketScanner":
+    async def __aenter__(self) -> "MarketScanner":
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self.close()
+    async def __aexit__(self, *args: object) -> None:
+        await self.close()
 
     # =========================================================================
     # Métodos públicos
     # =========================================================================
 
-    def escanear_mercados(self) -> list[Market]:
+    async def escanear_mercados(self) -> list[Market]:
         """
         Escanea y retorna mercados activos filtrados.
 
@@ -72,7 +67,7 @@ class MarketScanner:
         logger.info("Iniciando escaneo de mercados en Polymarket...")
 
         # Paso 1: Obtener mercados crudos de la API
-        mercados_crudos = self._obtener_mercados_activos()
+        mercados_crudos = await self._obtener_mercados_activos()
         logger.info(f"Mercados crudos obtenidos: {len(mercados_crudos)}")
 
         # Paso 2: Parsear a nuestro modelo
@@ -94,7 +89,7 @@ class MarketScanner:
 
         return resultado
 
-    def obtener_mercado_por_id(self, condition_id: str) -> Market | None:
+    async def obtener_mercado_por_id(self, condition_id: str) -> Market | None:
         """
         Obtiene un mercado específico por su condition_id.
 
@@ -105,7 +100,7 @@ class MarketScanner:
             Market si se encuentra, None si no existe.
         """
         try:
-            respuesta = self._hacer_request(
+            respuesta = await self._hacer_request(
                 "/markets",
                 params={"condition_ids": condition_id},
             )
@@ -120,7 +115,7 @@ class MarketScanner:
     # Métodos privados - Obtención de datos
     # =========================================================================
 
-    def _obtener_mercados_activos(self) -> list[dict]:
+    async def _obtener_mercados_activos(self) -> list[dict]:
         """
         Obtiene todos los mercados activos de la API Gamma con paginación.
 
@@ -141,7 +136,7 @@ class MarketScanner:
                 "offset": offset,
             }
 
-            mercados = self._hacer_request("/markets", params=params)
+            mercados = await self._hacer_request("/markets", params=params)
 
             if not mercados:
                 break
@@ -160,15 +155,8 @@ class MarketScanner:
 
         return todos_los_mercados
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError)),
-        before_sleep=lambda retry_state: logger.warning(
-            f"Reintentando request (intento {retry_state.attempt_number})..."
-        ),
-    )
-    def _hacer_request(
+    @retry_async(max_attempts=4, base_delay=2.0, max_delay=16.0)
+    async def _hacer_request(
         self, endpoint: str, params: dict | None = None
     ) -> list[dict]:
         """
@@ -185,7 +173,7 @@ class MarketScanner:
             httpx.HTTPStatusError: Si la API responde con error después de reintentos.
         """
         url = f"{self._gamma_url}{endpoint}"
-        respuesta = self._client.get(url, params=params)
+        respuesta = await self._client.get(url, params=params)
         respuesta.raise_for_status()
         data = respuesta.json()
 
@@ -197,7 +185,7 @@ class MarketScanner:
         return []
 
     # =========================================================================
-    # Métodos privados - Parsing
+    # Métodos privados - Parsing (sin cambios, son CPU-bound)
     # =========================================================================
 
     def _parsear_mercados(self, mercados_crudos: list[dict]) -> list[Market]:
@@ -378,6 +366,7 @@ class MarketScanner:
 
 def main() -> None:
     """Ejecuta el scanner y muestra los mercados encontrados."""
+    import asyncio
     from config import configurar_logging
     from rich.console import Console
     from rich.table import Table
@@ -386,51 +375,54 @@ def main() -> None:
     console = Console()
 
     console.print(
-        "\n[bold cyan]Polymarket Market Scanner - Fase 1[/bold cyan]\n"
+        "\n[bold cyan]Polymarket Market Scanner - Fase 1 (async)[/bold cyan]\n"
     )
 
-    with MarketScanner() as scanner:
-        mercados = scanner.escanear_mercados()
+    async def _run() -> None:
+        async with MarketScanner() as scanner:
+            mercados = await scanner.escanear_mercados()
 
-        if not mercados:
-            console.print("[bold red]No se encontraron mercados activos.[/bold red]")
-            return
+            if not mercados:
+                console.print("[bold red]No se encontraron mercados activos.[/bold red]")
+                return
 
-        # Crear tabla bonita
-        tabla = Table(
-            title=f"Mercados Activos ({len(mercados)})",
-            show_lines=True,
-        )
-        tabla.add_column("ID", style="dim", width=10)
-        tabla.add_column("Pregunta", style="bold", max_width=50)
-        tabla.add_column("YES", justify="center", style="green")
-        tabla.add_column("NO", justify="center", style="red")
-        tabla.add_column("Vol 24h", justify="right", style="cyan")
-        tabla.add_column("Liquidez", justify="right", style="blue")
-        tabla.add_column("Días", justify="center")
-        tabla.add_column("Categoría", style="magenta")
-
-        for m in mercados:
-            dias = str(m.days_to_resolution) if m.days_to_resolution else "N/A"
-            tabla.add_row(
-                m.condition_id[:8] + "...",
-                m.question[:50],
-                f"${m.yes_price:.2f}",
-                f"${m.no_price:.2f}",
-                f"${m.volume_24h:,.0f}",
-                f"${m.liquidity:,.0f}",
-                dias,
-                m.category or "-",
+            # Crear tabla bonita
+            tabla = Table(
+                title=f"Mercados Activos ({len(mercados)})",
+                show_lines=True,
             )
+            tabla.add_column("ID", style="dim", width=10)
+            tabla.add_column("Pregunta", style="bold", max_width=50)
+            tabla.add_column("YES", justify="center", style="green")
+            tabla.add_column("NO", justify="center", style="red")
+            tabla.add_column("Vol 24h", justify="right", style="cyan")
+            tabla.add_column("Liquidez", justify="right", style="blue")
+            tabla.add_column("Días", justify="center")
+            tabla.add_column("Categoría", style="magenta")
 
-        console.print(tabla)
+            for m in mercados:
+                dias = str(m.days_to_resolution) if m.days_to_resolution else "N/A"
+                tabla.add_row(
+                    m.condition_id[:8] + "...",
+                    m.question[:50],
+                    f"${m.yes_price:.2f}",
+                    f"${m.no_price:.2f}",
+                    f"${m.volume_24h:,.0f}",
+                    f"${m.liquidity:,.0f}",
+                    dias,
+                    m.category or "-",
+                )
 
-        # Resumen
-        console.print(f"\n[bold green]Total mercados encontrados: {len(mercados)}")
-        vol_total = sum(m.volume_24h for m in mercados)
-        liq_total = sum(m.liquidity for m in mercados)
-        console.print(f"Volumen 24h total: ${vol_total:,.0f}")
-        console.print(f"Liquidez total: ${liq_total:,.0f}")
+            console.print(tabla)
+
+            # Resumen
+            console.print(f"\n[bold green]Total mercados encontrados: {len(mercados)}")
+            vol_total = sum(m.volume_24h for m in mercados)
+            liq_total = sum(m.liquidity for m in mercados)
+            console.print(f"Volumen 24h total: ${vol_total:,.0f}")
+            console.print(f"Liquidez total: ${liq_total:,.0f}")
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
