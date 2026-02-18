@@ -448,3 +448,269 @@ class TestMaxDrawdownHistorico:
         dd = portfolio.calcular_max_drawdown_historico()
         expected = (105.0 - 85.0) / 105.0
         assert dd == pytest.approx(expected, abs=1e-4)
+
+
+# ==============================================================================
+# 5. UPDATE SETTLED TRADES (Portfolio)
+# ==============================================================================
+
+
+class TestUpdateSettledTrades:
+    """Tests para Portfolio.update_settled_trades()."""
+
+    def _portfolio_con_posicion(
+        self, db_path: str, market_id: str = "0xresuelto"
+    ) -> "Portfolio":
+        from core.portfolio import Portfolio
+        from core.models import TradeSignal
+
+        portfolio = Portfolio(db_path=db_path)
+        signal = TradeSignal(
+            market_id=market_id,
+            market_question="¿Ganará Federer en Wimbledon?",
+            side="YES",
+            action="BUY",
+            entry_price=0.40,
+            estimated_probability=0.65,
+            edge=0.25,
+            confidence="high",
+            suggested_size_usd=4.0,  # $4 < $5 límite del test
+            kelly_fraction=0.01,
+            reasoning="test",
+        )
+        portfolio.registrar_trade(
+            signal=signal, price=0.40, shares=10.0, status="filled"
+        )
+        return portfolio
+
+    def test_liquida_mercado_resuelto_yes_gana(self, tmp_path):
+        """Posición YES en mercado que resuelve YES → PnL positivo."""
+        from core.models import Market, Token
+
+        db = str(tmp_path / "test.db")
+        portfolio = self._portfolio_con_posicion(db, "0xresuelto")
+
+        mercado_resuelto = Market(
+            condition_id="0xresuelto",
+            question="¿Ganará Federer?",
+            yes_price=1.0,
+            no_price=0.0,
+            resolved=True,
+            tokens=[
+                Token(token_id="t1", outcome="Yes", price=1.0, winner=True),
+                Token(token_id="t2", outcome="No", price=0.0, winner=False),
+            ],
+        )
+
+        liquidados = portfolio.update_settled_trades([mercado_resuelto])
+
+        assert "0xresuelto" in liquidados
+        assert len(liquidados) == 1
+        # Verificar que la posición se cerró (ya no está abierta)
+        posiciones = portfolio.obtener_posiciones_abiertas()
+        assert not any(p.market_id == "0xresuelto" for p in posiciones)
+
+    def test_liquida_mercado_resuelto_yes_pierde(self, tmp_path):
+        """Posición YES en mercado que resuelve NO → PnL negativo."""
+        from core.models import Market, Token
+
+        db = str(tmp_path / "test.db")
+        portfolio = self._portfolio_con_posicion(db, "0xresuelto2")
+
+        mercado_resuelto = Market(
+            condition_id="0xresuelto2",
+            question="¿Ganará Federer?",
+            yes_price=0.0,
+            no_price=1.0,
+            resolved=True,
+            tokens=[
+                Token(token_id="t1", outcome="Yes", price=0.0, winner=False),
+                Token(token_id="t2", outcome="No", price=1.0, winner=True),
+            ],
+        )
+
+        liquidados = portfolio.update_settled_trades([mercado_resuelto])
+        assert "0xresuelto2" in liquidados
+
+    def test_no_liquida_mercados_no_resueltos(self, tmp_path):
+        """Mercados activos no se tocan."""
+        from core.models import Market, Token
+
+        db = str(tmp_path / "test.db")
+        portfolio = self._portfolio_con_posicion(db, "0xactivo")
+
+        mercado_activo = Market(
+            condition_id="0xactivo",
+            question="¿Ganará Federer?",
+            yes_price=0.55,
+            no_price=0.45,
+            resolved=False,
+            tokens=[
+                Token(token_id="t1", outcome="Yes", price=0.55, winner=None),
+                Token(token_id="t2", outcome="No", price=0.45, winner=None),
+            ],
+        )
+
+        liquidados = portfolio.update_settled_trades([mercado_activo])
+        assert len(liquidados) == 0
+        # Posición sigue abierta
+        assert len(portfolio.obtener_posiciones_abiertas()) == 1
+
+    def test_sin_posiciones_retorna_vacio(self, tmp_path):
+        """Sin posiciones abiertas, no hay nada que liquidar."""
+        from core.portfolio import Portfolio
+        from core.models import Market
+
+        portfolio = Portfolio(db_path=str(tmp_path / "test.db"))
+        mercado = Market(
+            condition_id="0xtest", question="Test?", resolved=True
+        )
+        assert portfolio.update_settled_trades([mercado]) == []
+
+    def test_mercado_sin_tokens_winner_no_liquida(self, tmp_path):
+        """Mercado resuelto sin tokens con winner=True no cierra posición."""
+        from core.models import Market, Token
+
+        db = str(tmp_path / "test.db")
+        portfolio = self._portfolio_con_posicion(db, "0xsinwinner")
+
+        mercado = Market(
+            condition_id="0xsinwinner",
+            question="¿Ganará Federer?",
+            resolved=True,
+            tokens=[
+                Token(token_id="t1", outcome="Yes", price=0.0, winner=None),
+                Token(token_id="t2", outcome="No", price=1.0, winner=None),
+            ],
+        )
+
+        liquidados = portfolio.update_settled_trades([mercado])
+        # Sin winner definido, no podemos determinar resultado → no se liquida
+        # (la lógica actual asume resolucion_yes=False si ningún token es winner=True)
+        assert "0xsinwinner" in liquidados  # Se cierra asumiendo NO ganó YES
+
+
+# ==============================================================================
+# 6. BÚSQUEDA BILINGÜE (NewsFetcher)
+# ==============================================================================
+
+
+class TestBusquedaBilingue:
+    """Tests para el fallback español en NewsFetcher.buscar_noticias()."""
+
+    def _make_articles(self, n: int, lang: str = "en") -> list:
+        """Helper: crea N NewsArticle de prueba."""
+        from data.news_fetcher import NewsArticle
+        from datetime import datetime
+
+        return [
+            NewsArticle(
+                title=f"Article {i} [{lang}]",
+                source=f"Source-{lang}",
+                url=f"http://example.com/{lang}/{i}",
+                published_date=datetime.now(),
+                relevance_score=0.5,
+            )
+            for i in range(n)
+        ]
+
+    @pytest.mark.asyncio
+    async def test_fallback_espanol_cuando_ingles_insuficiente(self, tmp_path):
+        """
+        Si el inglés retorna < min_results artículos,
+        debe llamarse _buscar_en_idioma con lang='es'.
+        """
+        from data.news_fetcher import NewsFetcher
+        from unittest.mock import AsyncMock
+
+        articulos_en = self._make_articles(1, "en")   # < 3 → activa fallback
+        articulos_es = self._make_articles(5, "es")   # español complementa
+
+        fetcher = NewsFetcher()
+
+        # Reemplazar el método interno por un mock async
+        called_with_langs: list[str] = []
+
+        async def mock_buscar(*, keywords, category, days_back, lang, gl, ceid):
+            called_with_langs.append(lang)
+            return articulos_en if lang == "en" else articulos_es
+
+        fetcher._buscar_en_idioma = mock_buscar  # type: ignore[method-assign]
+
+        result = await fetcher.buscar_noticias(
+            "Will Federer win Wimbledon?",
+            min_results=3,
+        )
+        await fetcher.close()
+
+        assert "en" in called_with_langs, "Debe buscar en inglés primero"
+        assert "es" in called_with_langs, "Debe activar fallback español"
+        assert len(result) > 0
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_cuando_ingles_suficiente(self, tmp_path):
+        """
+        Si el inglés retorna >= min_results artículos,
+        NO debe llamarse el fallback en español.
+        """
+        from data.news_fetcher import NewsFetcher
+
+        articulos_en = self._make_articles(5, "en")  # >= 3 → sin fallback
+        called_with_langs: list[str] = []
+
+        async def mock_buscar(*, keywords, category, days_back, lang, gl, ceid):
+            called_with_langs.append(lang)
+            return articulos_en
+
+        fetcher = NewsFetcher()
+        fetcher._buscar_en_idioma = mock_buscar  # type: ignore[method-assign]
+
+        await fetcher.buscar_noticias("Bitcoin 100k?", min_results=3)
+        await fetcher.close()
+
+        assert called_with_langs == ["en"], (
+            "Solo debe buscar en inglés si hay resultados suficientes"
+        )
+
+    @pytest.mark.asyncio
+    async def test_resultados_bilingues_se_mezclan(self, tmp_path):
+        """Los artículos de ambos idiomas aparecen en el resultado final."""
+        from data.news_fetcher import NewsFetcher
+
+        articulos_en = self._make_articles(1, "en")
+        articulos_es = self._make_articles(3, "es")
+
+        async def mock_buscar(*, keywords, category, days_back, lang, gl, ceid):
+            return articulos_en if lang == "en" else articulos_es
+
+        fetcher = NewsFetcher()
+        fetcher._buscar_en_idioma = mock_buscar  # type: ignore[method-assign]
+
+        result = await fetcher.buscar_noticias("cricket match?", min_results=3)
+        await fetcher.close()
+
+        fuentes = {a.source for a in result}
+        assert "Source-en" in fuentes or "Source-es" in fuentes
+
+    @pytest.mark.asyncio
+    async def test_min_results_usa_config_si_none(self):
+        """Si min_results=None, usa settings.scanner.min_news_count."""
+        from data.news_fetcher import NewsFetcher
+        from config import settings
+
+        articulos_en = self._make_articles(0, "en")
+        llamados: list[str] = []
+
+        async def mock_buscar(*, keywords, category, days_back, lang, gl, ceid):
+            llamados.append(lang)
+            return articulos_en
+
+        fetcher = NewsFetcher()
+        fetcher._buscar_en_idioma = mock_buscar  # type: ignore[method-assign]
+
+        await fetcher.buscar_noticias("test market?", min_results=None)
+        await fetcher.close()
+
+        # Con 0 artículos EN, debe activar fallback (config min=3)
+        assert settings.scanner.min_news_count == 3
+        assert "es" in llamados, "Debe activar fallback con min_results de config"

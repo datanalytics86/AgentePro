@@ -437,6 +437,71 @@ class Portfolio:
 
         return round(max_dd, 6)
 
+    def update_settled_trades(
+        self, mercados: list  # list[Market] — sin import para evitar circular
+    ) -> list[str]:
+        """
+        Detecta mercados resueltos y liquida posiciones automáticamente.
+
+        Itera las posiciones abiertas, busca si el mercado correspondiente
+        ya tiene un token ganador en ``mercados``, calcula el precio de
+        cierre (1.0 si ganamos, 0.0 si perdemos) y llama a
+        ``cerrar_posicion()`` para registrar el PnL realizado en SQLite.
+
+        Debe ejecutarse al final de cada ciclo del agente para que el
+        Dashboard refleje inmediatamente el dinero real ganado.
+
+        Args:
+            mercados: Lista de ``Market`` con estado actualizado,
+                      incluyendo los que ya se resolvieron (``resolved=True``
+                      y ``token.winner`` definido).
+
+        Returns:
+            Lista de ``market_id`` que se liquidaron en esta llamada.
+        """
+        posiciones = self.obtener_posiciones_abiertas()
+        if not posiciones:
+            return []
+
+        # Índice market_id → Market para búsqueda O(1)
+        mapa: dict[str, object] = {m.condition_id: m for m in mercados}
+        liquidados: list[str] = []
+
+        for pos in posiciones:
+            mercado = mapa.get(pos.market_id)
+            if mercado is None or not mercado.resolved:
+                continue
+
+            # Determinar si el resultado YES ganó buscando en los tokens
+            resolucion_yes = any(
+                t.outcome.lower() == "yes" and t.winner is True
+                for t in mercado.tokens
+            )
+
+            # Precio de cierre: paga $1 por share si ganamos, $0 si perdemos
+            if pos.side == "YES":
+                precio_cierre = 1.0 if resolucion_yes else 0.0
+            else:
+                # En posición NO, ganamos si el resultado fue NO
+                precio_cierre = 1.0 if not resolucion_yes else 0.0
+
+            pnl = self.cerrar_posicion(pos.market_id, pos.side, precio_cierre)
+            liquidados.append(pos.market_id)
+
+            logger.info(
+                f"Posición liquidada: {pos.market_question[:50]} | "
+                f"{'YES ganó' if resolucion_yes else 'NO ganó'} | "
+                f"Nuestro lado: {pos.side} | PnL: ${pnl:+.2f}"
+            )
+
+        if liquidados:
+            logger.info(
+                f"update_settled_trades: {len(liquidados)} posición(es) "
+                f"liquidada(s), balance actualizado en SQLite (WAL mode)"
+            )
+
+        return liquidados
+
     def registrar_balance(self, balance: float) -> None:
         """Registra el balance actual para tracking histórico."""
         with self._get_conn() as conn:

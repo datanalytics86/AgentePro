@@ -250,6 +250,20 @@ class AgentOrchestrator:
         await self._revisar_posiciones()
 
         # =====================================================================
+        # Paso 7.5: LIQUIDAR posiciones de mercados ya resueltos
+        # =====================================================================
+        logger.info("Paso 7.5: Liquidando posiciones de mercados resueltos...")
+        liquidados = self._portfolio.update_settled_trades(mercados)
+        if liquidados:
+            # Devolver capital liberado al executor (paper mode)
+            balance_tras_liquidacion = self._executor.obtener_balance()
+            self._portfolio.registrar_balance(balance_tras_liquidacion)
+            logger.info(
+                f"  {len(liquidados)} posición(es) liquidada(s). "
+                f"Balance: ${balance_tras_liquidacion:.2f}"
+            )
+
+        # =====================================================================
         # Paso 8: REPORTAR
         # =====================================================================
         metricas = self._portfolio.calcular_metricas()

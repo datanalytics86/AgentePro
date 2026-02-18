@@ -83,6 +83,8 @@ class ScannerConfig:
     max_markets_per_cycle: int = int(_get_env("MAX_MARKETS_PER_CYCLE", "20"))
     # Timeout para requests HTTP en segundos
     http_timeout_seconds: int = int(_get_env("HTTP_TIMEOUT_SECONDS", "30"))
+    # Mínimo de noticias en inglés antes de activar fallback en español
+    min_news_count: int = int(_get_env("MIN_NEWS_COUNT", "3"))
 
 
 # =============================================================================

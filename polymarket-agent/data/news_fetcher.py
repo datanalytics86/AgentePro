@@ -110,82 +110,155 @@ class NewsFetcher:
         category: str = "",
         max_results: int = 10,
         days_back: int = 7,
+        min_results: int | None = None,
     ) -> list[NewsArticle]:
         """
         Busca noticias relevantes para una pregunta de mercado.
 
-        Descarga todos los feeds en paralelo con asyncio.gather.
+        Estrategia bilingüe con fallback automático en español:
+
+        1. Busca en inglés en paralelo (Google News EN + feeds RSS).
+        2. Si hay menos de ``min_results`` artículos únicos, lanza
+           automáticamente una segunda búsqueda en español (Google News CL)
+           para mercados globales con mejor cobertura en medios hispanos
+           (tenis, críquet, política latinoamericana, etc.).
+        3. Fusiona y deduplica los resultados de ambas búsquedas.
+
+        Esto elimina los avisos de calidad=poor en mercados globales y
+        mejora la evaluación del LLM al proveer más contexto.
 
         Args:
-            question: Pregunta del mercado (e.g., "Will Bitcoin reach $100k?").
-            category: Categoría del mercado (e.g., "crypto", "politics").
+            question:    Pregunta del mercado (en inglés, típicamente).
+            category:    Categoría del mercado (e.g., "crypto", "sports").
             max_results: Máximo de artículos a retornar.
-            days_back: Cuántos días hacia atrás buscar.
+            days_back:   Cuántos días hacia atrás buscar.
+            min_results: Umbral para activar fallback español. Si es None,
+                         usa ``settings.scanner.min_news_count`` (default 3).
 
         Returns:
-            Lista de artículos ordenados por relevancia.
+            Lista de artículos ordenados por relevancia (bilingüe si aplica).
         """
-        logger.info(f"Buscando noticias para: '{question[:60]}...'")
+        if min_results is None:
+            min_results = settings.scanner.min_news_count
 
-        # Preparar todas las tareas de fetching en paralelo
-        tareas: list[asyncio.Task] = []
+        logger.info(f"Buscando noticias [EN] para: '{question[:60]}'")
         keywords = self._extraer_keywords(question)
 
-        # 1. Google News RSS
-        query = "+".join(keywords[:5])
-        google_url = f"https://news.google.com/rss/search?q={query}&hl=en&gl=US&ceid=US:en"
-        tareas.append(asyncio.ensure_future(
-            self._parsear_feed(google_url, "Google News")
-        ))
+        # ── Fase 1: Búsqueda en inglés (paralelo) ──────────────────────────
+        noticias_en = await self._buscar_en_idioma(
+            keywords=keywords,
+            category=category,
+            days_back=days_back,
+            lang="en",
+            gl="US",
+            ceid="US:en",
+        )
 
-        # 2. Feeds de categoría
-        if category:
-            feeds_categoria = CATEGORY_FEEDS.get(category.lower(), [])
-            for feed_url in feeds_categoria:
-                tareas.append(asyncio.ensure_future(
-                    self._parsear_feed(feed_url, f"RSS-{category}")
-                ))
+        # ── Fase 2: Fallback español si hay pocos resultados ────────────────
+        if len(noticias_en) < min_results:
+            logger.info(
+                f"  Solo {len(noticias_en)} artículo(s) en inglés "
+                f"(umbral={min_results}). "
+                f"Activando búsqueda de respaldo en español [ES-CL]..."
+            )
+            noticias_es = await self._buscar_en_idioma(
+                keywords=keywords,
+                category=category,
+                days_back=days_back,
+                lang="es",
+                gl="CL",
+                ceid="CL:es",
+            )
+            todas: list[NewsArticle] = noticias_en + noticias_es
+            idiomas_log = f"EN={len(noticias_en)}, ES={len(noticias_es)}"
+        else:
+            todas = noticias_en
+            idiomas_log = f"EN={len(noticias_en)}"
 
-        # 3. Feeds generales (primeros 3)
-        for nombre, url in list(RSS_FEEDS.items())[:3]:
-            tareas.append(asyncio.ensure_future(
-                self._parsear_feed(url, nombre)
-            ))
-
-        # Ejecutar todos los fetches en paralelo
-        resultados = await asyncio.gather(*tareas, return_exceptions=True)
-
-        todas_las_noticias: list[NewsArticle] = []
-        for resultado in resultados:
-            if isinstance(resultado, list):
-                todas_las_noticias.extend(resultado)
-            elif isinstance(resultado, Exception):
-                logger.debug(f"Feed falló: {resultado}")
-
-        # 4. Filtrar por fecha
-        fecha_limite = datetime.now() - timedelta(days=days_back)
-        noticias_recientes = [
-            n for n in todas_las_noticias
-            if n.published_date is None or n.published_date >= fecha_limite
-        ]
-
-        # 5. Calcular relevancia y ordenar
-        for noticia in noticias_recientes:
+        # ── Fase 3: Calcular relevancia, ordenar y deduplicar ───────────────
+        for noticia in todas:
             noticia.relevance_score = self._calcular_relevancia(
                 noticia, keywords
             )
 
-        noticias_recientes.sort(key=lambda n: n.relevance_score, reverse=True)
+        todas.sort(key=lambda n: n.relevance_score, reverse=True)
+        resultado_final = self._deduplicar(todas)[:max_results]
 
-        # 6. Deduplicar por título similar
-        noticias_unicas = self._deduplicar(noticias_recientes)
-
-        resultado_final = noticias_unicas[:max_results]
         logger.info(
             f"Noticias encontradas: {len(resultado_final)} "
-            f"(de {len(todas_las_noticias)} totales)"
+            f"({idiomas_log})"
         )
         return resultado_final
+
+    async def _buscar_en_idioma(
+        self,
+        keywords: list[str],
+        category: str,
+        days_back: int,
+        lang: str,
+        gl: str,
+        ceid: str,
+    ) -> list[NewsArticle]:
+        """
+        Ejecuta una búsqueda RSS completa en el idioma indicado.
+
+        Descarga Google News + feeds de categoría + feeds generales
+        en paralelo con asyncio.gather y filtra por fecha.
+
+        Args:
+            keywords: Palabras clave extraídas de la pregunta del mercado.
+            category: Categoría del mercado.
+            days_back: Horizonte temporal de búsqueda (días).
+            lang:     Código de idioma para Google News (``en`` / ``es``).
+            gl:       Código de país para Google News (``US`` / ``CL``).
+            ceid:     CEID de Google News (``US:en`` / ``CL:es``).
+
+        Returns:
+            Lista de artículos filtrados por fecha (sin deduplicar aún).
+        """
+        tareas: list[asyncio.Task] = []
+        query = "+".join(keywords[:5])
+        idioma_label = lang.upper()
+
+        # 1. Google News RSS en el idioma solicitado
+        google_url = (
+            f"https://news.google.com/rss/search"
+            f"?q={query}&hl={lang}&gl={gl}&ceid={ceid}"
+        )
+        tareas.append(asyncio.ensure_future(
+            self._parsear_feed(google_url, f"Google News ({idioma_label})")
+        ))
+
+        # 2. Feeds de categoría (solo en inglés; no duplicar en fallback ES)
+        if category and lang == "en":
+            for feed_url in CATEGORY_FEEDS.get(category.lower(), []):
+                tareas.append(asyncio.ensure_future(
+                    self._parsear_feed(feed_url, f"RSS-{category}")
+                ))
+
+        # 3. Feeds generales (solo en inglés para no duplicar fuentes)
+        if lang == "en":
+            for nombre, url in list(RSS_FEEDS.items())[:3]:
+                tareas.append(asyncio.ensure_future(
+                    self._parsear_feed(url, nombre)
+                ))
+
+        # Ejecutar en paralelo
+        resultados = await asyncio.gather(*tareas, return_exceptions=True)
+
+        todas: list[NewsArticle] = []
+        for resultado in resultados:
+            if isinstance(resultado, list):
+                todas.extend(resultado)
+            elif isinstance(resultado, Exception):
+                logger.debug(f"Feed falló ({idioma_label}): {resultado}")
+
+        # Filtrar por fecha
+        fecha_limite = datetime.now() - timedelta(days=days_back)
+        return [
+            n for n in todas
+            if n.published_date is None or n.published_date >= fecha_limite
+        ]
 
     # =========================================================================
     # Métodos de búsqueda
