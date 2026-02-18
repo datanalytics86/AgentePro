@@ -255,6 +255,64 @@ class ProbabilityEngine:
         return _llm_cache.stats
 
     # =========================================================================
+    # Criterio de Kelly — Position Sizing
+    # =========================================================================
+
+    @staticmethod
+    def calcular_kelly_size(
+        p: float,
+        yes_price: float,
+        bankroll: float,
+        kelly_fraction: float = 0.25,
+        max_pct: float = 0.10,
+    ) -> tuple[float, float]:
+        """
+        Calcula el tamaño óptimo de apuesta con el Criterio de Kelly.
+
+        Fórmula: f* = (p(b+1) - 1) / b
+        Donde b = (1/price) - 1 son las odds netas del mercado binario.
+
+        Aplica "Fractional Kelly" (0.25 por defecto) para reducir la
+        volatilidad del bankroll, y un cap duro de `max_pct` del capital
+        total por trade independientemente del resultado de Kelly.
+
+        Args:
+            p:              Probabilidad estimada por el LLM (0-1).
+            yes_price:      Precio actual del token YES (0-1, = 1/odds_brutas).
+            bankroll:       Capital total disponible en USD.
+            kelly_fraction: Factor fraccional de Kelly (default 0.25 = Quarter Kelly).
+            max_pct:        Porcentaje máximo del bankroll por trade (default 0.10 = 10%).
+
+        Returns:
+            Tupla ``(kelly_frac, size_usd)`` donde ``kelly_frac`` es la
+            fracción del bankroll a apostar y ``size_usd`` el monto en USD.
+            Ambos son 0.0 si no existe edge o los inputs son inválidos.
+        """
+        if not (0 < p < 1) or not (0 < yes_price < 1) or bankroll <= 0:
+            return 0.0, 0.0
+
+        # Odds netas: cuánto ganamos por cada dólar apostado si acierta
+        b = (1.0 / yes_price) - 1.0
+        if b <= 0:
+            return 0.0, 0.0
+
+        # Criterio de Kelly completo: f* = (p(b+1) - 1) / b
+        kelly_full = (p * (b + 1.0) - 1.0) / b
+
+        if kelly_full <= 0:
+            # Edge negativo: no apostar
+            return 0.0, 0.0
+
+        # Quarter Kelly (reduce varianza del bankroll ~4×)
+        kelly_frac = kelly_full * kelly_fraction
+
+        # Cap duro: nunca arriesgar más del max_pct del capital total
+        kelly_frac = min(kelly_frac, max_pct)
+
+        size_usd = round(bankroll * kelly_frac, 2)
+        return round(kelly_frac, 6), size_usd
+
+    # =========================================================================
     # Métodos privados - LLM
     # =========================================================================
 

@@ -23,6 +23,7 @@ from core.strategy import TradingStrategy
 from core.risk_manager import RiskManager
 from core.portfolio import Portfolio
 from core.executor import OrderExecutor
+from core.backup_manager import BackupManager
 from monitoring.alerts import TelegramAlerts
 from monitoring.reporter import Reporter
 
@@ -69,6 +70,10 @@ class AgentOrchestrator:
         self._alerts = TelegramAlerts()
         self._reporter = Reporter(self._portfolio)
 
+        # Backup periódico de la DB (24h, async, no bloquea)
+        self._backup_manager = BackupManager(settings.agent.database_path)
+        self._backup_task: asyncio.Task | None = None
+
         # Estado
         self._running = False
         self._ciclo_actual = 0
@@ -90,6 +95,12 @@ class AgentOrchestrator:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._manejar_shutdown_async)
+
+        # Iniciar backup periódico como tarea de fondo
+        self._backup_task = asyncio.create_task(
+            self._backup_manager.iniciar(),
+            name="backup_periodico",
+        )
 
         self._alerts.agente_iniciado(settings.agent.mode)
         logger.info(
@@ -254,7 +265,14 @@ class AgentOrchestrator:
         )
 
     async def _revisar_posiciones(self) -> None:
-        """Revisa posiciones abiertas y cierra las que ya no tienen edge."""
+        """
+        Revisa posiciones abiertas y ejecuta salidas anticipadas si es necesario.
+
+        Para cada posición abierta:
+        1. Obtiene precio actualizado del mercado.
+        2. Re-evalúa la probabilidad con el LLM (usa caché 60 min si disponible).
+        3. Si prob < 0.50 o el edge se invirtió, ejecuta SELL inmediato.
+        """
         posiciones = self._portfolio.obtener_posiciones_abiertas()
 
         if not posiciones:
@@ -262,19 +280,94 @@ class AgentOrchestrator:
             return
 
         logger.info(f"  Revisando {len(posiciones)} posiciones abiertas")
+        ventas_activas = 0
 
         for pos in posiciones:
-            # Obtener mercado actualizado (async)
+            # ── 1. Obtener mercado actualizado ──────────────────────────────
             mercado = await self._scanner.obtener_mercado_por_id(pos.market_id)
             if mercado is None:
+                logger.debug(f"  No se pudo obtener mercado {pos.market_id[:12]}")
                 continue
 
-            # Verificar si el mercado se resolvió
+            # ── 2. Mercados ya resueltos/cerrados: sin acción ───────────────
             if mercado.resolved or mercado.closed:
                 logger.info(
                     f"  Mercado resuelto/cerrado: {pos.market_question[:40]}"
                 )
                 continue
+
+            # ── 3. Recopilar contexto fresco (noticias + historial) ─────────
+            try:
+                contexto = await self._collector.recopilar_contexto(
+                    mercado, max_news=3
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"  Error recopilando contexto para "
+                    f"{pos.market_question[:40]}: {exc}"
+                )
+                continue
+
+            # ── 4. Re-evaluar probabilidad con LLM (usa caché si vigente) ───
+            evaluacion = await self._engine.evaluar_mercado(contexto)
+            if evaluacion is None:
+                logger.debug(
+                    f"  LLM no disponible para {pos.market_question[:40]}"
+                )
+                continue
+
+            # ── 5. Precio actual y edge recalculado ──────────────────────────
+            precio_actual = (
+                mercado.yes_price if pos.side == "YES" else mercado.no_price
+            )
+            prob = evaluacion.probability
+
+            if pos.side == "YES":
+                edge_actual = prob - precio_actual
+            else:
+                edge_actual = (1.0 - prob) - precio_actual
+
+            # ── 6. Decisión de salida anticipada ────────────────────────────
+            decision = self._strategy.evaluar_posicion_existente(
+                evaluacion_actual=evaluacion,
+                precio_entrada=pos.entry_price,
+                precio_actual=precio_actual,
+                side=pos.side,
+            )
+
+            if decision != "SELL":
+                logger.debug(
+                    f"  HOLD: {pos.market_question[:40]} | "
+                    f"p={prob:.2f} edge={edge_actual:+.3f}"
+                )
+                continue
+
+            # ── 7. Ejecutar salida anticipada ────────────────────────────────
+            razon = (
+                f"prob={prob:.2f} < 0.50"
+                if prob < 0.50
+                else f"edge={edge_actual:+.3f} negativo"
+            )
+            logger.warning(
+                f"  SALIDA ACTIVA: {pos.market_question[:45]} | {razon}"
+            )
+
+            pnl = self._executor.ejecutar_venta_activa(
+                market_id=pos.market_id,
+                market_question=pos.market_question,
+                side=pos.side,
+                precio_actual=precio_actual,
+            )
+
+            if pnl is not None:
+                ventas_activas += 1
+                logger.info(
+                    f"  Posición cerrada: {pos.market_question[:40]} | "
+                    f"PnL ${pnl:+.2f}"
+                )
+
+        if ventas_activas:
+            logger.info(f"  {ventas_activas} salida(s) activa(s) ejecutada(s)")
 
     def _verificar_reporte_diario(self) -> None:
         """Envía reporte diario si es la hora configurada."""
@@ -319,6 +412,12 @@ class AgentOrchestrator:
         # Guardar estado final
         balance = self._executor.obtener_balance()
         self._portfolio.registrar_balance(balance)
+
+        # Backup final antes de cerrar
+        self._backup_manager.detener()
+        if self._backup_task is not None:
+            self._backup_task.cancel()
+        await self._backup_manager.hacer_backup_ahora()
 
         # Generar reporte final
         reporte = self._reporter.generar_reporte_diario()

@@ -112,6 +112,55 @@ class PaperExecutor(BaseExecutor):
         """Retorna el balance virtual."""
         return self._balance
 
+    def ejecutar_venta(
+        self,
+        market_id: str,
+        side: str,
+        precio_actual: float,
+        portfolio: Portfolio,
+    ) -> float | None:
+        """
+        Cierra una posición en paper trading al precio de mercado actual.
+
+        Calcula el cash de retorno como ``cost_basis + pnl`` y lo
+        devuelve al balance virtual para mantener la contabilidad correcta.
+
+        Args:
+            market_id:     ID del mercado a cerrar.
+            side:          Lado de la posición ("YES" o "NO").
+            precio_actual: Precio actual del token en el mercado.
+            portfolio:     Portafolio para actualizar registros.
+
+        Returns:
+            PnL realizado en USD, o None si no existía la posición.
+        """
+        # Obtener detalles antes de cerrar
+        posiciones = portfolio.obtener_posiciones_abiertas()
+        pos = next(
+            (p for p in posiciones
+             if p.market_id == market_id and p.side == side),
+            None,
+        )
+        if pos is None:
+            logger.warning(
+                f"[PAPER] Venta: no existe posición {market_id[:12]} {side}"
+            )
+            return None
+
+        # Cerrar en portfolio (actualiza pnl en DB)
+        pnl = portfolio.cerrar_posicion(market_id, side, precio_actual)
+
+        # Devolver capital al balance: dinero inicial + ganancia/pérdida
+        cash_back = pos.cost_basis + pnl
+        self._balance += cash_back
+
+        logger.info(
+            f"[PAPER] Venta activa: {market_id[:12]} {side} "
+            f"@ {precio_actual:.3f} | PnL: ${pnl:+.2f} | "
+            f"Balance: ${self._balance:.2f}"
+        )
+        return pnl
+
     def simular_resolucion(
         self,
         market_id: str,
@@ -348,6 +397,52 @@ class OrderExecutor:
     def obtener_balance(self) -> float:
         """Retorna el balance actual."""
         return self._executor.obtener_balance()
+
+    def ejecutar_venta_activa(
+        self,
+        market_id: str,
+        market_question: str,
+        side: str,
+        precio_actual: float,
+    ) -> float | None:
+        """
+        Ejecuta una salida anticipada cerrando una posición al precio actual.
+
+        Usado por el orquestador cuando la re-evaluación del LLM detecta
+        que la probabilidad cayó bajo 0.50 o el edge se volvió negativo.
+
+        Args:
+            market_id:      ID del mercado.
+            market_question: Pregunta del mercado (para logging).
+            side:           Lado de la posición ("YES" o "NO").
+            precio_actual:  Precio de mercado actual del token.
+
+        Returns:
+            PnL realizado en USD, o None si falló la operación.
+        """
+        logger.info(
+            f"Ejecutando salida activa: {market_question[:45]} "
+            f"[{side}] @ {precio_actual:.3f}"
+        )
+
+        if isinstance(self._executor, PaperExecutor):
+            pnl = self._executor.ejecutar_venta(
+                market_id=market_id,
+                side=side,
+                precio_actual=precio_actual,
+                portfolio=self._portfolio,
+            )
+        else:
+            # Modo live: cerrar en portfolio (sin llamar al CLOB por seguridad)
+            # En producción: enviar SELL al CLOB antes de cerrar
+            pnl = self._portfolio.cerrar_posicion(market_id, side, precio_actual)
+
+        if pnl is not None:
+            balance = self.obtener_balance()
+            self._portfolio.registrar_balance(balance)
+            logger.info(f"Salida activa completada: PnL ${pnl:+.2f}")
+
+        return pnl
 
     # =========================================================================
     # Pre-flight checks

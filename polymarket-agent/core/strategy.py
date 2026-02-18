@@ -72,12 +72,14 @@ class TradingStrategy:
         # Determinar acción
         action = self._determinar_accion(edge, evaluacion.confidence)
 
-        # Calcular sizing con Kelly
+        # Calcular sizing con Criterio de Kelly (formula correcta)
         kelly_frac = 0.0
         suggested_size = 0.0
         if action == "BUY":
-            kelly_frac = self._calcular_kelly(edge, entry_price)
-            suggested_size = self._calcular_tamaño(kelly_frac)
+            kelly_frac, suggested_size = self._calcular_kelly_size(
+                prob=prob,
+                entry_price=entry_price,
+            )
 
         señal = TradeSignal(
             market_id=market.condition_id,
@@ -88,8 +90,8 @@ class TradingStrategy:
             estimated_probability=prob,
             edge=edge,
             confidence=evaluacion.confidence,
-            suggested_size_usd=round(suggested_size, 2),
-            kelly_fraction=round(kelly_frac, 4),
+            suggested_size_usd=suggested_size,
+            kelly_fraction=round(kelly_frac, 6),
             reasoning=evaluacion.reasoning,
             timestamp=datetime.now(),
         )
@@ -216,59 +218,41 @@ class TradingStrategy:
 
         return "HOLD"
 
-    def _calcular_kelly(self, edge: float, entry_price: float) -> float:
+    def _calcular_kelly_size(
+        self,
+        prob: float,
+        entry_price: float,
+    ) -> tuple[float, float]:
         """
-        Calcula la fracción de Kelly para dimensionar la posición.
+        Calcula fracción de Kelly y tamaño en USD usando la fórmula correcta.
 
-        Kelly formula: f = edge / (odds - 1)
-        Usamos fractional Kelly (25% por defecto) para ser conservadores.
+        Fórmula: f* = (p(b+1) - 1) / b, donde b = (1/price) - 1.
+        Aplica Fractional Kelly (``kelly_fraction`` de config, default 0.25)
+        y un cap duro de ``max_per_trade_pct`` del bankroll (default 5%).
 
         Args:
-            edge: Diferencia entre nuestra estimación y el precio.
-            entry_price: Precio de entrada del token.
+            prob:        Probabilidad estimada por el LLM (0-1).
+            entry_price: Precio de entrada del token (0-1).
 
         Returns:
-            Fracción del bankroll a apostar (0 a 1).
+            Tupla ``(kelly_fraction, size_usd)``.
         """
-        if edge <= 0 or entry_price <= 0 or entry_price >= 1:
-            return 0.0
+        from core.probability_engine import ProbabilityEngine
 
-        # Calcular odds decimales
-        # Si compramos YES a 0.40, las odds son 1/0.40 = 2.5
-        odds = 1.0 / entry_price
-
-        # Kelly: f = edge / (odds - 1)
-        if odds <= 1:
-            return 0.0
-
-        kelly_full = edge / (odds - 1)
-
-        # Aplicar fracción de Kelly (conservador)
-        kelly_fractional = kelly_full * self._config.kelly_fraction
-
-        # Limitar al máximo por trade
-        max_fraction = self._risk_config.max_per_trade_pct
-
-        return min(kelly_fractional, max_fraction)
-
-    def _calcular_tamaño(self, kelly_fraction: float) -> float:
-        """
-        Convierte fracción de Kelly a tamaño en USDC.
-
-        Args:
-            kelly_fraction: Fracción del bankroll.
-
-        Returns:
-            Tamaño en USDC.
-        """
         bankroll = self._risk_config.max_bankroll_usd
-        size = bankroll * kelly_fraction
+        kelly_frac, size_usd = ProbabilityEngine.calcular_kelly_size(
+            p=prob,
+            yes_price=entry_price,
+            bankroll=bankroll,
+            kelly_fraction=self._config.kelly_fraction,
+            max_pct=self._risk_config.max_per_trade_pct,
+        )
 
-        # Mínimo viable para que tenga sentido operar
-        if size < 1.0:
-            return 0.0
+        # Mínimo viable
+        if size_usd < 1.0:
+            return 0.0, 0.0
 
-        return size
+        return kelly_frac, size_usd
 
 
 # =============================================================================

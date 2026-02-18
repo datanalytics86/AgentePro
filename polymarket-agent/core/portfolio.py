@@ -408,6 +408,35 @@ class Portfolio:
             peak_balance=peak,
         )
 
+    def calcular_max_drawdown_historico(self) -> float:
+        """
+        Calcula el máximo drawdown histórico desde el balance registrado.
+
+        Recorre todo el historial de balance y detecta la mayor caída
+        desde un pico local (peak-to-trough), expresada como porcentaje.
+
+        Returns:
+            Máximo drawdown como fracción (0-1). Ejemplo: 0.15 = 15%.
+        """
+        historial = self.obtener_historial_balance(limit=10_000)
+        if len(historial) < 2:
+            return 0.0
+
+        # historial viene DESC (más reciente primero); invertir para ASC
+        balances = [h["balance"] for h in reversed(historial)]
+
+        peak = balances[0]
+        max_dd = 0.0
+        for balance in balances:
+            if balance > peak:
+                peak = balance
+            if peak > 0:
+                dd = (peak - balance) / peak
+                if dd > max_dd:
+                    max_dd = dd
+
+        return round(max_dd, 6)
+
     def registrar_balance(self, balance: float) -> None:
         """Registra el balance actual para tracking histórico."""
         with self._get_conn() as conn:
