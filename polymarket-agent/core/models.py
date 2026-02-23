@@ -136,7 +136,8 @@ class TradeSignal(BaseModel):
     Contiene toda la información necesaria para decidir y ejecutar
     una operación.
     """
-    market_id: str = Field(description="ID del mercado")
+    market_id: str = Field(description="ID del mercado (condition_id)")
+    token_id: str = Field(default="", description="Token ID para órdenes CLOB")
     market_question: str = Field(description="Pregunta del mercado")
     side: Literal["YES", "NO"] = Field(description="Lado de la apuesta")
     action: Literal["BUY", "SELL", "HOLD"] = Field(

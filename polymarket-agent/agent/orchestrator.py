@@ -32,6 +32,40 @@ logger = logging.getLogger(__name__)
 # Timeout máximo por ciclo en modo Turbo (segundos)
 TURBO_CYCLE_TIMEOUT = 300
 
+# Valor placeholder que indica credencial no configurada
+_PLACEHOLDER = "PENDIENTE_CONFIGURAR"
+
+
+def validar_credenciales_live() -> None:
+    """
+    Valida que las credenciales requeridas para modo LIVE no sean
+    placeholders ni estén vacías.
+
+    Se ejecuta al iniciar el agente. Si falta alguna credencial,
+    lanza EnvironmentError con la lista de variables pendientes.
+    """
+    if settings.es_modo_paper():
+        return
+
+    faltantes: list[str] = []
+    checks = [
+        (settings.polymarket.private_key, "POLYMARKET_PRIVATE_KEY"),
+        (settings.polymarket.api_key, "POLYMARKET_API_KEY"),
+        (settings.polymarket.api_secret, "POLYMARKET_API_SECRET"),
+        (settings.polymarket.api_passphrase, "POLYMARKET_API_PASSPHRASE"),
+        (settings.anthropic.api_key, "ANTHROPIC_API_KEY"),
+    ]
+
+    for valor, nombre in checks:
+        if not valor or valor == _PLACEHOLDER:
+            faltantes.append(nombre)
+
+    if faltantes:
+        raise EnvironmentError(
+            f"Modo LIVE requiere credenciales reales. "
+            f"Configura en .env: {', '.join(faltantes)}"
+        )
+
 
 class AgentOrchestrator:
     """
@@ -56,6 +90,9 @@ class AgentOrchestrator:
     def __init__(self) -> None:
         configurar_logging()
         logger.info("Inicializando agente de Polymarket (async)...")
+
+        # Validar credenciales antes de crear componentes costosos
+        validar_credenciales_live()
 
         # Componentes async
         self._scanner = MarketScanner()
@@ -366,11 +403,16 @@ class AgentOrchestrator:
                 f"  SALIDA ACTIVA: {pos.market_question[:45]} | {razon}"
             )
 
+            # Resolver token_id para modo live (CLOB necesita token_id, no condition_id)
+            from core.executor import resolver_token_id
+            token_id = resolver_token_id(mercado.tokens, pos.side)
+
             pnl = self._executor.ejecutar_venta_activa(
                 market_id=pos.market_id,
                 market_question=pos.market_question,
                 side=pos.side,
                 precio_actual=precio_actual,
+                token_id=token_id,
             )
 
             if pnl is not None:

@@ -4,7 +4,7 @@ Motor de ejecución de órdenes en Polymarket.
 Ejecuta operaciones aprobadas por el RiskManager con
 verificaciones pre-vuelo y modo paper trading.
 
-Fase 6 del agente autónomo.
+Fase 6 del agente autónomo — completado para Live Trading.
 """
 
 import logging
@@ -18,6 +18,27 @@ from core.portfolio import Portfolio
 from core.risk_manager import RiskManager
 
 logger = logging.getLogger(__name__)
+
+
+def resolver_token_id(tokens: list, side: str) -> str:
+    """
+    Resuelve el token_id correcto para un lado del mercado.
+
+    Busca en la lista de tokens del mercado el que coincide
+    con el outcome (YES/NO) y retorna su token_id para el CLOB.
+
+    Args:
+        tokens: Lista de Token del mercado.
+        side:   "YES" o "NO".
+
+    Returns:
+        token_id del token correspondiente, o cadena vacía si no se encuentra.
+    """
+    side_lower = side.lower()
+    for token in tokens:
+        if token.outcome.lower() == side_lower:
+            return token.token_id
+    return ""
 
 
 class BaseExecutor(ABC):
@@ -205,7 +226,7 @@ class LiveExecutor(BaseExecutor):
     Ejecutor de trading real en Polymarket CLOB.
 
     Usa py-clob-client para interactuar con el order book.
-    Requiere wallet y API keys configurados.
+    Requiere wallet y API keys configurados en .env.
     """
 
     def __init__(self) -> None:
@@ -255,59 +276,124 @@ class LiveExecutor(BaseExecutor):
         portfolio: Portfolio,
     ) -> TradeRecord | None:
         """
-        Ejecuta una orden real en Polymarket.
+        Ejecuta una orden BUY real en Polymarket CLOB.
 
-        Implementa limit orders con slippage protection.
+        Usa el token_id de la señal (no condition_id) para enviar
+        la orden al libro de órdenes correcto.
         """
         try:
-            from py_clob_client.order_builder.constants import BUY, SELL
+            from py_clob_client.order_builder.constants import BUY
 
-            # Determinar token_id del lado correcto
-            token_id = signal.market_id  # Necesita el token_id real
-
-            # Calcular precio con slippage
-            if signal.action == "BUY":
-                price = min(
-                    signal.entry_price + self._exec_config.slippage_tolerance,
-                    0.99,
+            # Resolver token_id desde la señal
+            token_id = signal.token_id
+            if not token_id:
+                logger.error(
+                    "[LIVE] token_id vacío en señal. No se puede ejecutar "
+                    f"orden para {signal.market_question[:40]}"
                 )
-                side = BUY
-            else:
-                price = max(
-                    signal.entry_price - self._exec_config.slippage_tolerance,
-                    0.01,
-                )
-                side = SELL
+                return None
 
-            size = signal.suggested_size_usd
+            # Pre-flight: verificar que el precio no se movió demasiado
+            if not self._verificar_precio_actual(token_id, signal.entry_price):
+                return None
 
-            # Crear y enviar orden
+            # Calcular precio con slippage (comprar un poco más caro)
+            price = min(
+                signal.entry_price + self._exec_config.slippage_tolerance,
+                0.99,
+            )
+
+            # Convertir USD a shares: shares = usd / price
+            size_shares = round(signal.suggested_size_usd / price, 2)
+
+            # Crear y enviar orden al CLOB
             order = self._client.create_and_post_order(
                 token_id=token_id,
                 price=price,
-                size=size,
-                side=side,
+                size=size_shares,
+                side=BUY,
             )
 
-            if order and hasattr(order, "id"):
+            order_id = self._extraer_order_id(order)
+            if order_id:
                 record = portfolio.registrar_trade(
                     signal=signal,
                     price=price,
-                    shares=size / price,
+                    shares=size_shares,
                     status="filled",
-                    order_id=str(order.id),
+                    order_id=order_id,
                 )
                 logger.info(
-                    f"[LIVE] Orden ejecutada: {order.id} | "
-                    f"{signal.action} {signal.side} ${size:.2f}"
+                    f"[LIVE] BUY ejecutado: {order_id} | "
+                    f"{signal.side} {size_shares:.2f} shares @ {price:.3f} | "
+                    f"${signal.suggested_size_usd:.2f}"
                 )
                 return record
 
-            logger.warning("[LIVE] Orden no retornó ID")
+            logger.warning("[LIVE] Orden no retornó ID válido")
             return None
 
         except Exception as e:
             logger.error(f"[LIVE] Error ejecutando orden: {e}")
+            return None
+
+    def ejecutar_venta(
+        self,
+        token_id: str,
+        shares: float,
+        price: float,
+        market_id: str,
+        side: str,
+        portfolio: Portfolio,
+    ) -> float | None:
+        """
+        Ejecuta una venta (SELL) en el CLOB de Polymarket.
+
+        Envía una orden SELL al libro de órdenes y cierra la posición
+        en el portfolio si la orden es aceptada.
+
+        Args:
+            token_id:   Token ID del CLOB para este lado del mercado.
+            shares:     Cantidad de shares a vender.
+            price:      Precio de venta objetivo.
+            market_id:  Condition ID del mercado (para portfolio).
+            side:       "YES" o "NO" (para portfolio).
+            portfolio:  Portfolio para actualizar registros.
+
+        Returns:
+            PnL realizado en USD, o None si la operación falló.
+        """
+        try:
+            from py_clob_client.order_builder.constants import SELL
+
+            # Ajustar precio con slippage (vender un poco más barato)
+            sell_price = max(
+                price - self._exec_config.slippage_tolerance,
+                0.01,
+            )
+
+            order = self._client.create_and_post_order(
+                token_id=token_id,
+                price=sell_price,
+                size=round(shares, 2),
+                side=SELL,
+            )
+
+            order_id = self._extraer_order_id(order)
+            if order_id:
+                pnl = portfolio.cerrar_posicion(market_id, side, sell_price)
+                logger.info(
+                    f"[LIVE] SELL ejecutado: {order_id} | "
+                    f"{market_id[:12]} {side} {shares:.2f} shares "
+                    f"@ {sell_price:.3f} | PnL ${pnl:+.2f}"
+                )
+                return pnl
+
+            logger.warning("[LIVE] Orden de venta no retornó ID válido")
+            return None
+
+        except Exception as e:
+            logger.error(f"[LIVE] Error ejecutando venta: {e}")
             return None
 
     def cancelar_orden(self, order_id: str) -> bool:
@@ -321,14 +407,93 @@ class LiveExecutor(BaseExecutor):
             return False
 
     def obtener_balance(self) -> float:
-        """Obtiene el balance real de USDC."""
+        """
+        Obtiene el balance real de USDC disponible en Polymarket.
+
+        Usa la API del CLOB client para consultar el balance
+        de colateral (USDC, 6 decimales en Polygon).
+        """
         try:
-            # Esto depende de la implementación del CLOB client
-            # Intentar obtener balance via la API
-            return 0.0  # Placeholder
+            balance_data = self._client.get_balance_allowance()
+            # USDC en Polygon tiene 6 decimales: raw / 1e6 = USD
+            raw_balance = float(balance_data.get("balance", 0))
+            balance = raw_balance / 1e6
+            logger.debug(f"[LIVE] Balance USDC: ${balance:.2f}")
+            return balance
         except Exception as e:
             logger.error(f"[LIVE] Error obteniendo balance: {e}")
             return 0.0
+
+    # =========================================================================
+    # Métodos privados
+    # =========================================================================
+
+    def _verificar_precio_actual(
+        self, token_id: str, signal_price: float
+    ) -> bool:
+        """
+        Verifica que el precio actual del token no se haya desviado
+        demasiado respecto al precio de la señal (pre-flight drift check).
+
+        Returns:
+            True si el precio está dentro de tolerancia, False si no.
+        """
+        try:
+            book = self._client.get_order_book(token_id)
+
+            midpoint = None
+            if isinstance(book, dict):
+                # Calcular midpoint desde bids/asks
+                bids = book.get("bids", [])
+                asks = book.get("asks", [])
+                if bids and asks:
+                    best_bid = float(bids[0].get("price", 0))
+                    best_ask = float(asks[0].get("price", 1))
+                    midpoint = (best_bid + best_ask) / 2
+            elif hasattr(book, "bids") and hasattr(book, "asks"):
+                if book.bids and book.asks:
+                    best_bid = float(book.bids[0].price)
+                    best_ask = float(book.asks[0].price)
+                    midpoint = (best_bid + best_ask) / 2
+
+            if midpoint is None:
+                logger.warning(
+                    "[LIVE] No se pudo obtener precio actual del book, "
+                    "continuando con ejecución"
+                )
+                return True
+
+            deviation = abs(midpoint - signal_price)
+            max_dev = self._exec_config.max_price_deviation
+
+            if deviation > max_dev:
+                logger.warning(
+                    f"[LIVE] Precio se movió demasiado: "
+                    f"señal={signal_price:.3f} actual={midpoint:.3f} "
+                    f"desviación={deviation:.3f} > máx={max_dev:.3f}"
+                )
+                return False
+
+            logger.debug(
+                f"[LIVE] Precio OK: señal={signal_price:.3f} "
+                f"actual={midpoint:.3f} desv={deviation:.3f}"
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(f"[LIVE] Error verificando precio: {e}")
+            return True  # Permitir ejecución si falla la verificación
+
+    @staticmethod
+    def _extraer_order_id(order: object) -> str:
+        """Extrae el order ID de la respuesta del CLOB (dict u objeto)."""
+        if order is None:
+            return ""
+        if isinstance(order, dict):
+            return str(order.get("id", order.get("orderID", "")))
+        if hasattr(order, "id"):
+            return str(order.id)
+        return ""
 
 
 class OrderExecutor:
@@ -404,6 +569,7 @@ class OrderExecutor:
         market_question: str,
         side: str,
         precio_actual: float,
+        token_id: str = "",
     ) -> float | None:
         """
         Ejecuta una salida anticipada cerrando una posición al precio actual.
@@ -412,10 +578,11 @@ class OrderExecutor:
         que la probabilidad cayó bajo 0.50 o el edge se volvió negativo.
 
         Args:
-            market_id:      ID del mercado.
+            market_id:       ID del mercado (condition_id).
             market_question: Pregunta del mercado (para logging).
-            side:           Lado de la posición ("YES" o "NO").
-            precio_actual:  Precio de mercado actual del token.
+            side:            Lado de la posición ("YES" o "NO").
+            precio_actual:   Precio de mercado actual del token.
+            token_id:        Token ID del CLOB (requerido en modo live).
 
         Returns:
             PnL realizado en USD, o None si falló la operación.
@@ -433,9 +600,37 @@ class OrderExecutor:
                 portfolio=self._portfolio,
             )
         else:
-            # Modo live: cerrar en portfolio (sin llamar al CLOB por seguridad)
-            # En producción: enviar SELL al CLOB antes de cerrar
-            pnl = self._portfolio.cerrar_posicion(market_id, side, precio_actual)
+            # Modo live: enviar SELL al CLOB y actualizar portfolio
+            if not token_id:
+                logger.error(
+                    f"[LIVE] token_id requerido para venta activa de "
+                    f"{market_id[:12]}. Cerrando solo en portfolio."
+                )
+                pnl = self._portfolio.cerrar_posicion(
+                    market_id, side, precio_actual
+                )
+            else:
+                # Buscar la posición para saber cuántas shares vender
+                posiciones = self._portfolio.obtener_posiciones_abiertas()
+                pos = next(
+                    (p for p in posiciones
+                     if p.market_id == market_id and p.side == side),
+                    None,
+                )
+                if pos is None:
+                    logger.warning(
+                        f"[LIVE] No existe posición {market_id[:12]} {side}"
+                    )
+                    return None
+
+                pnl = self._executor.ejecutar_venta(
+                    token_id=token_id,
+                    shares=pos.shares,
+                    price=precio_actual,
+                    market_id=market_id,
+                    side=side,
+                    portfolio=self._portfolio,
+                )
 
         if pnl is not None:
             balance = self.obtener_balance()
@@ -458,8 +653,9 @@ class OrderExecutor:
                 f"< ${signal.suggested_size_usd:.2f}"
             )
 
-        # Check 2: Precio no se movió demasiado
-        # (en producción, verificar precio actual vs signal.entry_price)
+        # Check 2: Token ID presente (requerido en modo live)
+        if isinstance(self._executor, LiveExecutor) and not signal.token_id:
+            return False, "token_id vacío — no se puede operar en CLOB"
 
         # Check 3: Tamaño mínimo viable
         if signal.suggested_size_usd < 1.0:

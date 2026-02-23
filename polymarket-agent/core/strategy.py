@@ -69,6 +69,13 @@ class TradingStrategy:
             edge = edge_no
             entry_price = no_price
 
+        # Resolver token_id para órdenes CLOB
+        token_id = ""
+        for token in market.tokens:
+            if token.outcome.lower() == side.lower():
+                token_id = token.token_id
+                break
+
         # Determinar acción
         action = self._determinar_accion(edge, evaluacion.confidence)
 
@@ -83,6 +90,7 @@ class TradingStrategy:
 
         señal = TradeSignal(
             market_id=market.condition_id,
+            token_id=token_id,
             market_question=market.question,
             side=side,
             action=action,

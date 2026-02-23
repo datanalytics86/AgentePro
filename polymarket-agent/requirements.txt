@@ -9,8 +9,7 @@ httpx>=0.27.0                 # Cliente HTTP moderno
 tenacity>=9.0.0               # Reintentos con backoff exponencial
 
 # --- Polymarket ---
-# py-clob-client se instala por separado si se necesita ejecución real
-# Para Fase 1 usamos la API Gamma directamente via httpx
+py-clob-client>=0.2.0            # Cliente CLOB de Polymarket (ejecución live)
 
 # --- LLM ---
 anthropic>=0.40.0             # SDK de Anthropic (Claude API)

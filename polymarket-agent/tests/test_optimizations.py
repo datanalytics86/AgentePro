@@ -1,15 +1,19 @@
 """
-Tests para las 4 optimizaciones críticas:
+Tests para las optimizaciones del agente:
 1. Criterio de Kelly (ProbabilityEngine.calcular_kelly_size)
 2. Salida Anticipada (executor.ejecutar_venta_activa / PaperExecutor.ejecutar_venta)
 3. Backup Manager (BackupManager async)
 4. P&L Dashboard (Portfolio.calcular_max_drawdown_historico)
+5. Update Settled Trades (Portfolio.update_settled_trades)
+6. Búsqueda bilingüe (NewsFetcher)
+7. Live Trading: resolver_token_id, credential validation, token_id en señales
 
 Todos los tests async usan pytest-asyncio con modo 'auto'.
 """
 
 import asyncio
 import sqlite3
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -18,12 +22,13 @@ import pytest
 import pytest_asyncio
 
 # ─── imports del proyecto ─────────────────────────────────────────────────────
+from config import settings
 from core.probability_engine import ProbabilityEngine
 from core.backup_manager import BackupManager
 from core.portfolio import Portfolio, Position
-from core.executor import PaperExecutor, OrderExecutor
+from core.executor import PaperExecutor, OrderExecutor, resolver_token_id
 from core.risk_manager import RiskManager
-from core.models import TradeSignal
+from core.models import Token, TradeSignal
 
 
 # ==============================================================================
@@ -714,3 +719,373 @@ class TestBusquedaBilingue:
         # Con 0 artículos EN, debe activar fallback (config min=3)
         assert settings.scanner.min_news_count == 3
         assert "es" in llamados, "Debe activar fallback con min_results de config"
+
+
+# ==============================================================================
+# 7. RESOLVER TOKEN ID
+# ==============================================================================
+
+
+class TestResolverTokenId:
+    """Tests para la función resolver_token_id."""
+
+    def test_resuelve_yes_token(self):
+        """Dado tokens YES/NO, side='YES' retorna el token_id de YES."""
+        tokens = [
+            Token(token_id="tok-yes-abc", outcome="Yes", price=0.6),
+            Token(token_id="tok-no-xyz", outcome="No", price=0.4),
+        ]
+        assert resolver_token_id(tokens, "YES") == "tok-yes-abc"
+
+    def test_resuelve_no_token(self):
+        """Dado tokens YES/NO, side='NO' retorna el token_id de NO."""
+        tokens = [
+            Token(token_id="tok-yes-abc", outcome="Yes", price=0.6),
+            Token(token_id="tok-no-xyz", outcome="No", price=0.4),
+        ]
+        assert resolver_token_id(tokens, "NO") == "tok-no-xyz"
+
+    def test_retorna_vacio_si_no_hay_match(self):
+        """Si no existe el outcome solicitado, retorna cadena vacía."""
+        tokens = [Token(token_id="tok-yes", outcome="Yes", price=0.6)]
+        assert resolver_token_id(tokens, "NO") == ""
+
+    def test_lista_vacia_retorna_vacio(self):
+        """Con lista vacía de tokens, retorna cadena vacía."""
+        assert resolver_token_id([], "YES") == ""
+
+    def test_case_insensitive(self):
+        """La comparación es case-insensitive (outcome='Yes' vs side='YES')."""
+        tokens = [
+            Token(token_id="tok-yes", outcome="yes", price=0.6),
+            Token(token_id="tok-no", outcome="NO", price=0.4),
+        ]
+        assert resolver_token_id(tokens, "YES") == "tok-yes"
+        assert resolver_token_id(tokens, "no") == "tok-no"
+
+
+# ==============================================================================
+# 8. TOKEN_ID EN TRADE SIGNAL
+# ==============================================================================
+
+
+class TestTradeSignalTokenId:
+    """Tests para el campo token_id en TradeSignal."""
+
+    def _crear_signal(self, **overrides) -> TradeSignal:
+        defaults = dict(
+            market_id="cond-001",
+            market_question="Will it rain?",
+            side="YES",
+            action="BUY",
+            entry_price=0.50,
+            estimated_probability=0.65,
+            edge=0.15,
+            confidence="high",
+            suggested_size_usd=10.0,
+            kelly_fraction=0.025,
+            reasoning="test signal",
+        )
+        defaults.update(overrides)
+        return TradeSignal(**defaults)
+
+    def test_default_vacio(self):
+        """token_id por defecto es cadena vacía."""
+        signal = self._crear_signal()
+        assert signal.token_id == ""
+
+    def test_asignable(self):
+        """token_id se puede asignar al crear la señal."""
+        signal = self._crear_signal(token_id="tok-abc-123")
+        assert signal.token_id == "tok-abc-123"
+
+    def test_strategy_popula_token_id(self):
+        """TradingStrategy.generar_señal() rellena token_id del mercado."""
+        from core.strategy import TradingStrategy
+        from core.models import Market, LLMEvaluation
+        from core.data_collector import MarketContext
+
+        market = Market(
+            condition_id="0xtest-cond",
+            question="Will it rain?",
+            yes_price=0.40,
+            no_price=0.60,
+            tokens=[
+                Token(token_id="tok-yes-real", outcome="Yes", price=0.40),
+                Token(token_id="tok-no-real", outcome="No", price=0.60),
+            ],
+        )
+        ctx = MarketContext(market=market, data_quality="sufficient")
+        ev = LLMEvaluation(
+            probability=0.65,
+            confidence="high",
+            reasoning="test",
+            key_factors=["test"],
+            risks_to_thesis=["test"],
+        )
+
+        strategy = TradingStrategy()
+        señal = strategy.generar_señal(ctx, ev)
+
+        # Con p=0.65, YES tiene edge=0.25 > NO edge=-0.25 → side=YES
+        assert señal.side == "YES"
+        assert señal.token_id == "tok-yes-real"
+
+
+# ==============================================================================
+# 9. VALIDACIÓN DE CREDENCIALES
+# ==============================================================================
+
+
+class TestValidarCredenciales:
+    """Tests para validar_credenciales_live()."""
+
+    def test_paper_mode_no_valida(self, monkeypatch):
+        """En modo paper, no se validan credenciales (no lanza error)."""
+        import agent.orchestrator as orch_mod
+
+        mock_settings = MagicMock()
+        mock_settings.es_modo_paper.return_value = True
+        monkeypatch.setattr(orch_mod, "settings", mock_settings)
+
+        # No debería lanzar excepción
+        orch_mod.validar_credenciales_live()
+
+    def test_live_mode_placeholder_falla(self, monkeypatch):
+        """En modo live con credenciales placeholder, lanza EnvironmentError."""
+        import agent.orchestrator as orch_mod
+
+        mock_settings = MagicMock()
+        mock_settings.es_modo_paper.return_value = False
+        mock_settings.polymarket.private_key = "PENDIENTE_CONFIGURAR"
+        mock_settings.polymarket.api_key = "PENDIENTE_CONFIGURAR"
+        mock_settings.polymarket.api_secret = "PENDIENTE_CONFIGURAR"
+        mock_settings.polymarket.api_passphrase = "PENDIENTE_CONFIGURAR"
+        mock_settings.anthropic.api_key = "PENDIENTE_CONFIGURAR"
+        monkeypatch.setattr(orch_mod, "settings", mock_settings)
+
+        with pytest.raises(EnvironmentError, match="POLYMARKET_PRIVATE_KEY"):
+            orch_mod.validar_credenciales_live()
+
+    def test_live_mode_credenciales_ok(self, monkeypatch):
+        """En modo live con credenciales reales, no lanza error."""
+        import agent.orchestrator as orch_mod
+
+        mock_settings = MagicMock()
+        mock_settings.es_modo_paper.return_value = False
+        mock_settings.polymarket.private_key = "0xabc123real"
+        mock_settings.polymarket.api_key = "real-api-key"
+        mock_settings.polymarket.api_secret = "real-secret"
+        mock_settings.polymarket.api_passphrase = "real-passphrase"
+        mock_settings.anthropic.api_key = "sk-ant-real-key"
+        monkeypatch.setattr(orch_mod, "settings", mock_settings)
+
+        # No debería lanzar excepción
+        orch_mod.validar_credenciales_live()
+
+    def test_live_mode_vacio_falla(self, monkeypatch):
+        """Credenciales vacías también se detectan como faltantes."""
+        import agent.orchestrator as orch_mod
+
+        mock_settings = MagicMock()
+        mock_settings.es_modo_paper.return_value = False
+        mock_settings.polymarket.private_key = ""
+        mock_settings.polymarket.api_key = "real-key"
+        mock_settings.polymarket.api_secret = "real-secret"
+        mock_settings.polymarket.api_passphrase = "real-pass"
+        mock_settings.anthropic.api_key = "sk-ant-key"
+        monkeypatch.setattr(orch_mod, "settings", mock_settings)
+
+        with pytest.raises(EnvironmentError, match="POLYMARKET_PRIVATE_KEY"):
+            orch_mod.validar_credenciales_live()
+
+
+# ==============================================================================
+# 10. LIVE EXECUTOR — MOCK TESTS
+# ==============================================================================
+
+
+class TestLiveExecutorMocked:
+    """Tests para LiveExecutor con CLOB client mockeado."""
+
+    def _create_live_executor(self) -> "LiveExecutor":
+        """Crea un LiveExecutor con cliente CLOB mockeado."""
+        from core.executor import LiveExecutor
+
+        executor = object.__new__(LiveExecutor)
+        executor._config = settings.polymarket
+        executor._exec_config = settings.execution
+        executor._client = MagicMock()
+        return executor
+
+    def test_obtener_balance_real(self):
+        """obtener_balance() convierte raw USDC (6 decimales) a USD."""
+        executor = self._create_live_executor()
+        # 100.50 USDC = 100_500_000 raw
+        executor._client.get_balance_allowance.return_value = {
+            "balance": "100500000"
+        }
+
+        balance = executor.obtener_balance()
+        assert balance == pytest.approx(100.50, abs=0.01)
+
+    def test_obtener_balance_error_retorna_cero(self):
+        """Si el CLOB falla, retorna 0.0 sin lanzar excepción."""
+        executor = self._create_live_executor()
+        executor._client.get_balance_allowance.side_effect = Exception("timeout")
+
+        balance = executor.obtener_balance()
+        assert balance == 0.0
+
+    def test_ejecutar_orden_sin_token_id(self):
+        """Sin token_id en la señal, retorna None."""
+        executor = self._create_live_executor()
+        signal = TradeSignal(
+            market_id="cond-1",
+            token_id="",  # vacío
+            market_question="Test?",
+            side="YES",
+            action="BUY",
+            entry_price=0.50,
+            estimated_probability=0.65,
+            edge=0.15,
+            confidence="high",
+            suggested_size_usd=5.0,
+            kelly_fraction=0.025,
+            reasoning="test",
+        )
+        portfolio = MagicMock()
+
+        result = executor.ejecutar_orden(signal, portfolio)
+        assert result is None
+
+    def test_ejecutar_orden_con_token_id(self):
+        """Con token_id válido y respuesta OK, registra el trade."""
+        executor = self._create_live_executor()
+
+        # Mock del order book para price drift check
+        executor._client.get_order_book.return_value = {
+            "bids": [{"price": "0.49"}],
+            "asks": [{"price": "0.51"}],
+        }
+        # Mock de la orden exitosa
+        executor._client.create_and_post_order.return_value = {
+            "id": "order-live-001"
+        }
+
+        signal = TradeSignal(
+            market_id="cond-1",
+            token_id="tok-yes-real",
+            market_question="Test?",
+            side="YES",
+            action="BUY",
+            entry_price=0.50,
+            estimated_probability=0.65,
+            edge=0.15,
+            confidence="high",
+            suggested_size_usd=5.0,
+            kelly_fraction=0.025,
+            reasoning="test",
+        )
+
+        mock_portfolio = MagicMock()
+        mock_record = MagicMock()
+        mock_portfolio.registrar_trade.return_value = mock_record
+
+        # Mock py_clob_client ya que no está instalado en test
+        mock_constants = MagicMock()
+        mock_constants.BUY = "BUY"
+        with patch.dict(sys.modules, {
+            "py_clob_client": MagicMock(),
+            "py_clob_client.order_builder": MagicMock(),
+            "py_clob_client.order_builder.constants": mock_constants,
+        }):
+            result = executor.ejecutar_orden(signal, mock_portfolio)
+
+        assert result == mock_record
+        mock_portfolio.registrar_trade.assert_called_once()
+
+    def test_ejecutar_venta_exitosa(self, tmp_path):
+        """ejecutar_venta() envía SELL al CLOB y cierra posición."""
+        executor = self._create_live_executor()
+        executor._client.create_and_post_order.return_value = {
+            "id": "sell-001"
+        }
+
+        db = str(tmp_path / "test.db")
+        portfolio = Portfolio(db_path=db)
+
+        # Crear posición para cerrar
+        signal = TradeSignal(
+            market_id="0xmarket",
+            market_question="Test?",
+            side="YES",
+            action="BUY",
+            entry_price=0.40,
+            estimated_probability=0.65,
+            edge=0.25,
+            confidence="high",
+            suggested_size_usd=4.0,
+            kelly_fraction=0.025,
+            reasoning="test",
+        )
+        portfolio.registrar_trade(
+            signal=signal, price=0.40, shares=10.0, status="filled"
+        )
+
+        # Mock py_clob_client ya que no está instalado en test
+        mock_constants = MagicMock()
+        mock_constants.SELL = "SELL"
+        with patch.dict(sys.modules, {
+            "py_clob_client": MagicMock(),
+            "py_clob_client.order_builder": MagicMock(),
+            "py_clob_client.order_builder.constants": mock_constants,
+        }):
+            pnl = executor.ejecutar_venta(
+                token_id="tok-yes",
+                shares=10.0,
+                price=0.60,
+                market_id="0xmarket",
+                side="YES",
+                portfolio=portfolio,
+            )
+
+        assert pnl is not None
+        # PnL = (sell_price - entry_price) * shares
+        # sell_price = max(0.60 - 0.02, 0.01) = 0.58
+        assert pnl == pytest.approx((0.58 - 0.40) * 10.0, abs=0.01)
+
+    def test_price_drift_rechaza_orden(self):
+        """Si el precio se movió > max_price_deviation, rechaza la orden."""
+        executor = self._create_live_executor()
+
+        # Precio de la señal: 0.50, precio actual del book: 0.60 (drift=0.10 > 0.03)
+        executor._client.get_order_book.return_value = {
+            "bids": [{"price": "0.59"}],
+            "asks": [{"price": "0.61"}],
+        }
+
+        result = executor._verificar_precio_actual("tok-1", signal_price=0.50)
+        assert result is False
+
+    def test_price_drift_acepta_orden(self):
+        """Si el precio está dentro de tolerancia, acepta la orden."""
+        executor = self._create_live_executor()
+
+        # Precio de la señal: 0.50, precio actual: 0.51 (drift=0.01 < 0.03)
+        executor._client.get_order_book.return_value = {
+            "bids": [{"price": "0.505"}],
+            "asks": [{"price": "0.515"}],
+        }
+
+        result = executor._verificar_precio_actual("tok-1", signal_price=0.50)
+        assert result is True
+
+    def test_extraer_order_id_dict(self):
+        """_extraer_order_id funciona con dicts."""
+        from core.executor import LiveExecutor
+
+        assert LiveExecutor._extraer_order_id({"id": "abc"}) == "abc"
+        assert LiveExecutor._extraer_order_id({"orderID": "xyz"}) == "xyz"
+        assert LiveExecutor._extraer_order_id(None) == ""
+        assert LiveExecutor._extraer_order_id({}) == ""
