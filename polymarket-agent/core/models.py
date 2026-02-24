@@ -160,6 +160,7 @@ class TradeSignal(BaseModel):
         ge=0, le=1, description="Fracción de Kelly utilizada"
     )
     reasoning: str = Field(description="Justificación")
+    category: str = Field(default="", description="Categoría del mercado")
     timestamp: datetime = Field(
         default_factory=datetime.now, description="Momento de la señal"
     )

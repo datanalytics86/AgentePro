@@ -115,6 +115,7 @@ class AgentOrchestrator:
         self._running = False
         self._ciclo_actual = 0
         self._ultimo_reporte = datetime.now()
+        self._ultimo_reporte_semanal = datetime.now()
 
         logger.info(
             f"Agente inicializado en modo {settings.agent.mode.upper()} | "
@@ -165,8 +166,9 @@ class AgentOrchestrator:
                         f"{TURBO_CYCLE_TIMEOUT}s. Mercados lentos descartados."
                     )
 
-                # Verificar si toca reporte diario
+                # Verificar si toca reporte diario o semanal
                 self._verificar_reporte_diario()
+                self._verificar_reporte_semanal()
 
             except KeyboardInterrupt:
                 break
@@ -292,6 +294,10 @@ class AgentOrchestrator:
         logger.info("Paso 7.5: Liquidando posiciones de mercados resueltos...")
         liquidados = self._portfolio.update_settled_trades(mercados)
         if liquidados:
+            # Invalidar caché LLM para mercados resueltos
+            for mid in liquidados:
+                ProbabilityEngine.invalidar_cache_mercado(mid)
+
             # Devolver capital liberado al executor (paper mode)
             balance_tras_liquidacion = self._executor.obtener_balance()
             self._portfolio.registrar_balance(balance_tras_liquidacion)
@@ -451,6 +457,22 @@ class AgentOrchestrator:
             logger.info(f"\n{reporte}")
 
             self._ultimo_reporte = ahora
+
+    def _verificar_reporte_semanal(self) -> None:
+        """Envía reporte semanal los domingos a la hora del reporte diario."""
+        ahora = datetime.now()
+        hora_reporte = settings.agent.daily_report_hour
+
+        # Domingo = 6 en weekday()
+        if (
+            ahora.weekday() == 6
+            and ahora.hour == hora_reporte
+            and (ahora - self._ultimo_reporte_semanal).total_seconds() > 86400
+        ):
+            logger.info("Generando reporte semanal...")
+            reporte = self._reporter.generar_reporte_semanal()
+            logger.info(f"\n{reporte}")
+            self._ultimo_reporte_semanal = ahora
 
     # =========================================================================
     # Shutdown

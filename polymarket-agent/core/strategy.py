@@ -101,6 +101,7 @@ class TradingStrategy:
             suggested_size_usd=suggested_size,
             kelly_fraction=round(kelly_frac, 6),
             reasoning=evaluacion.reasoning,
+            category=market.category,
             timestamp=datetime.now(),
         )
 

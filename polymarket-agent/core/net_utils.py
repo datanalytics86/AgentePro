@@ -175,6 +175,13 @@ class TTLCache:
             "timestamp": time.monotonic(),
         }
 
+    def invalidate(self, market_id: str) -> bool:
+        """Elimina una entrada específica del caché. Retorna True si existía."""
+        if market_id in self._cache:
+            del self._cache[market_id]
+            return True
+        return False
+
     def clear(self) -> None:
         """Limpia todo el caché."""
         self._cache.clear()

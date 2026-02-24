@@ -10,6 +10,7 @@ Fase 3 del agente autónomo — refactorizado a asyncio con caché TTL.
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 
 from pydantic import ValidationError
@@ -138,12 +139,23 @@ class ProbabilityEngine:
     Envía contexto estructurado al LLM y parsea la respuesta
     en formato JSON validado. Usa caché TTL de 60 min para evitar
     re-evaluar mercados cuyo precio no cambió significativamente.
+
+    Incluye circuit breaker: tras ``_CB_THRESHOLD`` fallos consecutivos
+    de la API, pausa las llamadas por ``_CB_COOLDOWN_SECONDS`` segundos
+    y retorna None (HOLD) para todas las evaluaciones.
     """
+
+    # Circuit breaker: 5 fallos consecutivos → pausa 5 minutos
+    _CB_THRESHOLD = 5
+    _CB_COOLDOWN_SECONDS = 300
 
     def __init__(self) -> None:
         self._config = settings.anthropic
         self._client = self._crear_cliente()
         self._evaluaciones_log: list[dict] = []
+        # Circuit breaker state
+        self._cb_failures: int = 0
+        self._cb_open_until: float = 0.0  # monotonic timestamp
 
     def _crear_cliente(self) -> "anthropic.AsyncAnthropic":
         """Crea el cliente async de Anthropic con la API key configurada."""
@@ -168,6 +180,13 @@ class ProbabilityEngine:
         market_id = contexto.market.condition_id
         current_price = contexto.market.yes_price
 
+        # Circuit breaker: si está abierto, no llamar al LLM
+        if self._cb_is_open():
+            logger.warning(
+                f"Circuit breaker ABIERTO — saltando LLM para {market_id[:12]}"
+            )
+            return None
+
         # Consultar caché
         cached = _llm_cache.get(market_id, current_price)
         if cached is not None:
@@ -184,11 +203,19 @@ class ProbabilityEngine:
         prompt_usuario = _construir_prompt_usuario(contexto)
 
         # Intentar obtener evaluación del LLM con reintentos
-        respuesta_raw = await self._llamar_llm(prompt_usuario)
+        try:
+            respuesta_raw = await self._llamar_llm(prompt_usuario)
+        except Exception:
+            self._cb_record_failure()
+            return None
 
         if respuesta_raw is None:
+            self._cb_record_failure()
             logger.error("No se pudo obtener respuesta del LLM")
             return None
+
+        # Éxito: resetear circuit breaker
+        self._cb_record_success()
 
         # Parsear y validar la respuesta JSON
         evaluacion = self._parsear_respuesta(respuesta_raw)
@@ -423,6 +450,50 @@ class ProbabilityEngine:
             )
 
         return evaluacion
+
+    # =========================================================================
+    # Circuit breaker
+    # =========================================================================
+
+    def _cb_is_open(self) -> bool:
+        """True si el circuit breaker está abierto (API en pausa)."""
+        if self._cb_failures < self._CB_THRESHOLD:
+            return False
+        if time.monotonic() >= self._cb_open_until:
+            # Cooldown expiró: half-open, permitir un intento
+            logger.info("Circuit breaker: cooldown expiró, intentando reconectar LLM")
+            self._cb_failures = self._CB_THRESHOLD - 1
+            return False
+        return True
+
+    def _cb_record_failure(self) -> None:
+        """Registra un fallo de la API."""
+        self._cb_failures += 1
+        if self._cb_failures >= self._CB_THRESHOLD:
+            self._cb_open_until = time.monotonic() + self._CB_COOLDOWN_SECONDS
+            logger.error(
+                f"Circuit breaker ABIERTO: {self._cb_failures} fallos consecutivos. "
+                f"LLM pausado por {self._CB_COOLDOWN_SECONDS}s"
+            )
+
+    def _cb_record_success(self) -> None:
+        """Registra un éxito de la API, reseteando el circuit breaker."""
+        if self._cb_failures > 0:
+            logger.info(
+                f"Circuit breaker: LLM OK, reseteando contador "
+                f"(era {self._cb_failures})"
+            )
+        self._cb_failures = 0
+        self._cb_open_until = 0.0
+
+    # =========================================================================
+    # Invalidación de caché
+    # =========================================================================
+
+    @staticmethod
+    def invalidar_cache_mercado(market_id: str) -> bool:
+        """Invalida la caché del LLM para un mercado resuelto."""
+        return _llm_cache.invalidate(market_id)
 
     def _registrar_evaluacion(
         self,

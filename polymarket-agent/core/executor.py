@@ -672,7 +672,9 @@ class OrderExecutor:
             exposicion_mercado=self._portfolio.calcular_exposicion_mercado(
                 signal.market_id
             ),
-            exposicion_categoria=0,  # Se calcula con la categoría real
+            exposicion_categoria=self._portfolio.calcular_exposicion_categoria(
+                signal.category
+            ) if signal.category else 0,
             perdida_diaria=self._portfolio.calcular_perdida_diaria(),
             perdida_semanal=self._portfolio.calcular_perdida_semanal(),
             drawdown_actual=self._portfolio.calcular_metricas().current_drawdown,

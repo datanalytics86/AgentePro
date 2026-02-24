@@ -10,6 +10,7 @@ Uso:
     python scripts/verificar_fase1.py
 """
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from rich.panel import Panel
 console = Console()
 
 
-def verificar_fase1() -> bool:
+async def verificar_fase1() -> bool:
     """Ejecuta todos los checkpoints de la Fase 1."""
     configurar_logging()
     exitos = 0
@@ -36,14 +37,14 @@ def verificar_fase1() -> bool:
         title="Polymarket Agent",
     ))
 
-    with MarketScanner() as scanner:
+    async with MarketScanner() as scanner:
         # =====================================================================
         # Checkpoint 1: Obtener al menos 10 mercados activos
         # =====================================================================
         console.print("\n[bold]Checkpoint 1:[/bold] Obtener >= 10 mercados activos...")
 
         try:
-            mercados = scanner.escanear_mercados()
+            mercados = await scanner.escanear_mercados()
 
             if len(mercados) >= 10:
                 console.print(
@@ -101,7 +102,7 @@ def verificar_fase1() -> bool:
 
         try:
             # Obtener todos sin filtrar
-            mercados_sin_filtrar = scanner._obtener_mercados_activos()
+            mercados_sin_filtrar = await scanner._obtener_mercados_activos()
             total_sin_filtrar = len(mercados_sin_filtrar)
             total_filtrado = len(mercados)
 
@@ -145,5 +146,5 @@ def verificar_fase1() -> bool:
 
 
 if __name__ == "__main__":
-    ok = verificar_fase1()
+    ok = asyncio.run(verificar_fase1())
     sys.exit(0 if ok else 1)

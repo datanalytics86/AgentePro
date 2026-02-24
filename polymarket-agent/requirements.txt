@@ -24,8 +24,8 @@ aiosqlite>=0.20.0             # SQLite async
 
 # --- Monitoreo ---
 streamlit>=1.40.0             # Dashboard web
-python-telegram-bot>=21.0     # Alertas Telegram
 plotly>=5.24.0                # Gráficos interactivos
+# Telegram usa httpx directamente (no necesita python-telegram-bot)
 
 # --- Testing ---
 pytest>=8.0.0                 # Framework de testing
