@@ -129,10 +129,12 @@ class AgentOrchestrator:
         self._running = True
         intervalo = settings.agent.scan_interval_minutes * 60
 
-        # Configurar shutdown handlers
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, self._manejar_shutdown_async)
+        # Configurar shutdown handlers (Windows no soporta add_signal_handler)
+        import sys
+        if sys.platform != "win32":
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, self._manejar_shutdown_async)
 
         # Iniciar backup periódico como tarea de fondo
         self._backup_task = asyncio.create_task(
