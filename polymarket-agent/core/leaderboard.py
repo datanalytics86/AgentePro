@@ -364,10 +364,26 @@ class LeaderboardFetcher:
         respuesta.raise_for_status()
         data = respuesta.json()
 
+        # Log diagnóstico en primera consulta a cada endpoint
+        if not hasattr(self, "_endpoints_vistos"):
+            self._endpoints_vistos: set[str] = set()
+        if endpoint not in self._endpoints_vistos:
+            self._endpoints_vistos.add(endpoint)
+            sample = str(data)[:200] if data else "(vacío)"
+            logger.info(
+                f"Data API {endpoint}: tipo={type(data).__name__}, "
+                f"len={len(data) if isinstance(data, (list, dict)) else 'N/A'}, "
+                f"sample={sample}"
+            )
+
         if isinstance(data, list):
             return data
         if isinstance(data, dict) and "data" in data:
             return data["data"]
+        if isinstance(data, dict) and "positions" in data:
+            return data["positions"]
+        if isinstance(data, dict) and "history" in data:
+            return data["history"]
         if isinstance(data, dict):
             # Algunos endpoints retornan un dict directo
             return [data]
@@ -415,12 +431,20 @@ class LeaderboardFetcher:
             if not market_id:
                 return None
 
-            # Determinar side desde outcome o asset
-            outcome = entry.get("outcome", "")
+            # Determinar side desde outcome, direction o asset
+            outcome = (
+                entry.get("outcome", "")
+                or entry.get("direction", "")
+                or entry.get("side", "")
+            )
             side = ""
             if isinstance(outcome, str):
                 if outcome.lower() in ("yes", "no"):
                     side = outcome.upper()
+                elif outcome.lower() in ("long", "buy"):
+                    side = "YES"
+                elif outcome.lower() in ("short", "sell"):
+                    side = "NO"
 
             return TraderPosition(
                 market_id=market_id,

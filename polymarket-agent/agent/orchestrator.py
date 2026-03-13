@@ -17,6 +17,7 @@ import sys
 import time
 import traceback
 from datetime import datetime
+from typing import Any
 
 from config import settings, configurar_logging
 from core.market_scanner import MarketScanner
@@ -132,11 +133,15 @@ class AgentOrchestrator:
         self._running = True
         intervalo = settings.agent.scan_interval_minutes * 60
 
-        # Configurar shutdown handlers (Windows no soporta add_signal_handler)
+        # Configurar shutdown handlers
         if sys.platform != "win32":
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.add_signal_handler(sig, self._manejar_shutdown_async)
+        else:
+            # Windows: usar signal.signal para SIGINT (Ctrl+C)
+            signal.signal(signal.SIGINT, self._manejar_shutdown_signal)
+            signal.signal(signal.SIGTERM, self._manejar_shutdown_signal)
 
         # Iniciar backup periódico como tarea de fondo
         self._backup_task = asyncio.create_task(
@@ -170,12 +175,20 @@ class AgentOrchestrator:
                         f"TURBO: Ciclo #{self._ciclo_actual} excedió "
                         f"{TURBO_CYCLE_TIMEOUT}s. Continuando."
                     )
+                except asyncio.CancelledError:
+                    logger.warning(
+                        f"Ciclo #{self._ciclo_actual} cancelado. "
+                        f"Continuando al siguiente ciclo."
+                    )
 
                 # Verificar si toca reporte diario o semanal
                 self._verificar_reporte_diario()
                 self._verificar_reporte_semanal()
 
             except KeyboardInterrupt:
+                break
+            except asyncio.CancelledError:
+                logger.info("Agente cancelado. Deteniendo...")
                 break
             except Exception as e:
                 logger.error(f"Error en ciclo #{self._ciclo_actual}: {e}")
@@ -433,8 +446,13 @@ class AgentOrchestrator:
     # =========================================================================
 
     def _manejar_shutdown_async(self) -> None:
-        """Maneja señales de shutdown en modo async."""
+        """Maneja señales de shutdown en modo async (Unix)."""
         logger.info("Señal de shutdown recibida. Deteniendo...")
+        self._running = False
+
+    def _manejar_shutdown_signal(self, signum: int, frame: Any) -> None:
+        """Maneja señales de shutdown via signal.signal (Windows)."""
+        logger.info(f"Señal {signum} recibida. Deteniendo...")
         self._running = False
 
     async def _shutdown(self) -> None:
