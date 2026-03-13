@@ -219,12 +219,13 @@ class MarketHistory:
             logger.debug(f"Gamma timeseries no disponible: {e}")
 
         # Si no hay datos, intentar con el historial del CLOB
+        # Nota: la API CLOB prices-history usa token_id, NO condition_id
         if not history:
             try:
                 url = f"{self._clob_url}/prices-history"
                 params = {
-                    "market": condition_id,
-                    "interval": "1h",
+                    "market": token_id,
+                    "interval": "max",
                     "fidelity": 60,
                 }
                 respuesta = await self._client.get(url, params=params)

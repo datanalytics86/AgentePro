@@ -37,15 +37,17 @@ class NewsArticle(BaseModel):
 
 
 # Feeds RSS de medios internacionales accesibles desde Chile
+# Nota: Reuters cerró feeds gratuitos; rsshub.app/apnews da 403.
+# Feeds ordenados por fiabilidad — los primeros se usan en búsquedas generales.
 RSS_FEEDS: dict[str, str] = {
-    "Reuters World": "https://feeds.reuters.com/Reuters/worldNews",
-    "Reuters Business": "https://feeds.reuters.com/Reuters/businessNews",
-    "AP News": "https://rsshub.app/apnews/topics/apf-topnews",
-    "BBC World": "http://feeds.bbci.co.uk/news/world/rss.xml",
-    "BBC Business": "http://feeds.bbci.co.uk/news/business/rss.xml",
+    "BBC World": "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "BBC Business": "https://feeds.bbci.co.uk/news/business/rss.xml",
     "Al Jazeera": "https://www.aljazeera.com/xml/rss/all.xml",
     "NPR News": "https://feeds.npr.org/1001/rss.xml",
     "Google News": "https://news.google.com/rss",
+    "ABC News": "https://abcnews.go.com/abcnews/internationalheadlines",
+    "CBS News": "https://www.cbsnews.com/latest/rss/world",
+    "France24 EN": "https://www.france24.com/en/rss",
 }
 
 # Feeds temáticos para categorías específicas
@@ -55,8 +57,8 @@ CATEGORY_FEEDS: dict[str, list[str]] = {
         "https://www.coindesk.com/arc/outboundfeeds/rss/",
     ],
     "politics": [
-        "https://feeds.reuters.com/Reuters/PoliticsNews",
         "https://rss.politico.com/politics-news.xml",
+        "https://thehill.com/feed/",
     ],
     "sports": [
         "https://www.espn.com/espn/rss/news",
@@ -238,7 +240,7 @@ class NewsFetcher:
 
         # 3. Feeds generales (solo en inglés para no duplicar fuentes)
         if lang == "en":
-            for nombre, url in list(RSS_FEEDS.items())[:3]:
+            for nombre, url in list(RSS_FEEDS.items())[:5]:
                 tareas.append(asyncio.ensure_future(
                     self._parsear_feed(url, nombre)
                 ))

@@ -80,11 +80,13 @@ class TradingStrategy:
         action = self._determinar_accion(edge, evaluacion.confidence)
 
         # Calcular sizing con Criterio de Kelly (formula correcta)
+        # Para NO buys, usar la probabilidad del lado NO (1-prob)
         kelly_frac = 0.0
         suggested_size = 0.0
         if action == "BUY":
+            prob_for_kelly = prob if side == "YES" else (1 - prob)
             kelly_frac, suggested_size = self._calcular_kelly_size(
-                prob=prob,
+                prob=prob_for_kelly,
                 entry_price=entry_price,
             )
 
