@@ -1,36 +1,45 @@
-# Polymarket Agent - Agente Autónomo de Trading
+# Polymarket Copy-Trading Agent
 
-Agente autónomo de inversiones que opera en Polymarket (mercado de predicciones basado en blockchain) de forma independiente.
+Agente autónomo que opera en Polymarket copiando las posiciones de los mejores traders del leaderboard.
+
+## Estrategia
+
+**Copy-Trading:** En lugar de estimar probabilidades propias, el agente consulta el leaderboard de Polymarket, obtiene las posiciones de los top traders, e identifica mercados donde múltiples traders exitosos coinciden. Cuando hay consenso, replica la posición proporcionalmente a nuestro bankroll.
+
+### Flujo por ciclo
+
+1. Escanear mercados activos (filtrar por liquidez/volumen)
+2. Consultar leaderboard → top 20 traders por PnL
+3. Obtener posiciones abiertas de cada trader (en paralelo)
+4. Identificar mercados con consenso (3+ traders con misma posición)
+5. Generar señales de compra ponderadas por profit del trader
+6. Validar con risk manager (límites estrictos)
+7. Ejecutar trades aprobados
+8. Revisar posiciones (¿siguen los traders posicionados?)
+9. Liquidar mercados resueltos
 
 ## Estructura del Proyecto
 
 ```
 polymarket-agent/
-├── .env.example          # Template de variables de entorno
-├── config.py             # Configuración centralizada
-├── requirements.txt      # Dependencias Python
-├── core/                 # Componentes principales
-│   ├── models.py         # Modelos de datos (Market, TradeSignal, etc.)
-│   ├── market_scanner.py # Fase 1: Escaneo de mercados
-│   ├── data_collector.py # Fase 2: Recopilación de datos
-│   ├── probability_engine.py # Fase 3: Motor LLM
-│   ├── strategy.py       # Fase 4: Estrategia de decisión
-│   ├── risk_manager.py   # Fase 5: Gestión de riesgo
-│   ├── executor.py       # Fase 6: Ejecución de órdenes
-│   └── portfolio.py      # Fase 5: Tracking de portafolio
-├── data/                 # Pipeline de datos
-│   ├── news_fetcher.py   # Noticias y contexto
-│   ├── market_history.py # Histórico de precios
-│   └── sentiment.py      # Análisis de sentimiento
-├── monitoring/           # Monitoreo y alertas
-│   ├── dashboard.py      # Dashboard web (Streamlit)
-│   ├── alerts.py         # Alertas Telegram
-│   └── reporter.py       # Reportes de performance
-├── agent/                # Orquestación
-│   ├── orchestrator.py   # Loop principal
-│   └── scheduler.py      # Programación de tareas
-├── tests/                # Tests unitarios
-└── scripts/              # Scripts auxiliares
+├── config.py                # Configuración centralizada
+├── agent/
+│   └── orchestrator.py      # Loop principal (async)
+├── core/
+│   ├── models.py            # Modelos de datos (Pydantic)
+│   ├── market_scanner.py    # Escaneo de mercados (Gamma API)
+│   ├── leaderboard.py       # Scraper leaderboard + posiciones traders
+│   ├── copy_strategy.py     # Estrategia de copy-trading
+│   ├── risk_manager.py      # Gestión de riesgo
+│   ├── portfolio.py         # Portfolio tracking (SQLite)
+│   ├── executor.py          # Ejecución de órdenes (Paper/Live)
+│   └── net_utils.py         # Retry async, TTLCache
+├── monitoring/
+│   ├── dashboard.py         # Dashboard web (Streamlit)
+│   ├── alerts.py            # Alertas Telegram
+│   └── reporter.py          # Reportes de performance
+├── tests/                   # Tests unitarios
+└── scripts/                 # Scripts auxiliares
 ```
 
 ## Instalación
@@ -46,37 +55,37 @@ pip install -r requirements.txt
 # 3. Configurar variables de entorno
 cp .env.example .env
 # Editar .env con tus claves
-
-# 4. Verificar Fase 1
-python scripts/verificar_fase1.py
 ```
 
 ## Uso Rápido
 
 ```bash
-# Escanear mercados activos
-python -m core.market_scanner
-
 # Iniciar agente en modo paper trading
-python scripts/paper_trade.py
+python -m agent.orchestrator
 
 # Dashboard de monitoreo
 streamlit run monitoring/dashboard.py
 
-# Ejecutar tests (93 tests)
+# Ejecutar tests
 pytest tests/ -v
 ```
 
-## Fases de Desarrollo
+## Configuración Copy-Trading
 
-- [x] Fase 1: Conexión y escaneo de mercados
-- [x] Fase 2: Recopilación de datos y contexto
-- [x] Fase 3: Motor de evaluación de probabilidades (LLM)
-- [x] Fase 4: Estrategia de decisión
-- [x] Fase 5: Gestión de riesgo y portafolio
-- [x] Fase 6: Motor de ejecución
-- [x] Fase 7: Monitoreo y alertas
-- [x] Fase 8: Orquestador y despliegue
+| Variable | Default | Descripción |
+|----------|---------|-------------|
+| `COPY_TRADING_ENABLED` | `true` | Activar copy-trading |
+| `COPY_TRADING_TOP_N` | `20` | Top N traders a seguir |
+| `COPY_TRADING_WINDOW` | `all` | Ventana: 1d, 7d, 30d, all |
+| `COPY_MIN_CONSENSUS` | `3` | Min traders para señal |
+| `COPY_SIZE_PCT` | `0.03` | 3% bankroll por trade |
+| `COPY_MAX_NEW_PER_CYCLE` | `5` | Max nuevas posiciones/ciclo |
+
+Ver `.env.example` para la lista completa.
+
+## Documentación Técnica
+
+Ver `CLAUDE.md` para documentación completa: arquitectura, APIs, decisiones de diseño, y guía de desarrollo.
 
 ## Aviso Legal
 

@@ -93,7 +93,7 @@ class ScannerConfig:
 
 @dataclass(frozen=True)
 class StrategyConfig:
-    """Parámetros de la estrategia de trading."""
+    """Parámetros de la estrategia de trading (legacy edge detection)."""
     # Edge mínimo para considerar una operación (5% = 0.05)
     min_edge: float = float(_get_env("MIN_EDGE", "0.05"))
     # Confianza mínima del LLM para operar
@@ -102,6 +102,37 @@ class StrategyConfig:
     )  # type: ignore[assignment]
     # Factor de Kelly fraccional (0.25 = quarter Kelly, conservador)
     kelly_fraction: float = float(_get_env("KELLY_FRACTION", "0.25"))
+
+
+# =============================================================================
+# Configuración de Copy-Trading (Estrategia principal)
+# =============================================================================
+
+@dataclass(frozen=True)
+class CopyTradingConfig:
+    """
+    Parámetros de la estrategia de copy-trading.
+
+    Copia las posiciones de los mejores traders del leaderboard de Polymarket.
+    """
+    # Activar/desactivar copy-trading (si false, usa edge detection legacy)
+    enabled: bool = _get_env("COPY_TRADING_ENABLED", "true").lower() == "true"
+    # Cantidad de top traders a seguir
+    top_n: int = int(_get_env("COPY_TRADING_TOP_N", "20"))
+    # Ventana temporal del leaderboard: "1d", "7d", "30d", "all"
+    leaderboard_window: str = _get_env("COPY_TRADING_WINDOW", "all")
+    # Mínimo de top traders con posición para considerar consenso
+    min_traders_consensus: int = int(_get_env("COPY_MIN_CONSENSUS", "3"))
+    # Tamaño base por trade como % del bankroll (3% = 0.03)
+    copy_size_pct: float = float(_get_env("COPY_SIZE_PCT", "0.03"))
+    # Máximo nuevas posiciones por ciclo
+    max_new_positions_per_cycle: int = int(_get_env("COPY_MAX_NEW_PER_CYCLE", "5"))
+    # Precio máximo de entrada (no comprar tokens > 95%)
+    max_entry_price: float = float(_get_env("COPY_MAX_ENTRY_PRICE", "0.95"))
+    # Precio mínimo de entrada (no comprar tokens < 5%)
+    min_entry_price: float = float(_get_env("COPY_MIN_ENTRY_PRICE", "0.05"))
+    # Intervalo de actualización del leaderboard (minutos)
+    update_interval_minutes: int = int(_get_env("COPY_UPDATE_MINUTES", "60"))
 
 
 # =============================================================================
@@ -198,6 +229,7 @@ class Settings:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     scanner: ScannerConfig = field(default_factory=ScannerConfig)
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
+    copy_trading: CopyTradingConfig = field(default_factory=CopyTradingConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)

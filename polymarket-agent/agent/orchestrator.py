@@ -4,7 +4,10 @@ Orquestador principal del agente autónomo (async).
 Integra todos los componentes y ejecuta el loop principal
 que corre de forma autónoma 24/7 con asyncio.
 
-Fase 8 del agente autónomo — refactorizado a asyncio con modo Turbo.
+Estrategia: Copy-Trading — replica las posiciones de los mejores
+traders del leaderboard de Polymarket.
+
+Fase 8 del agente autónomo — refactorizado con copy-trading.
 """
 
 import asyncio
@@ -17,9 +20,8 @@ from datetime import datetime
 
 from config import settings, configurar_logging
 from core.market_scanner import MarketScanner
-from core.data_collector import DataCollector
-from core.probability_engine import ProbabilityEngine
-from core.strategy import TradingStrategy
+from core.leaderboard import LeaderboardFetcher
+from core.copy_strategy import CopyTradingStrategy
 from core.risk_manager import RiskManager
 from core.portfolio import Portfolio
 from core.executor import OrderExecutor
@@ -53,7 +55,6 @@ def validar_credenciales_live() -> None:
         (settings.polymarket.api_key, "POLYMARKET_API_KEY"),
         (settings.polymarket.api_secret, "POLYMARKET_API_SECRET"),
         (settings.polymarket.api_passphrase, "POLYMARKET_API_PASSPHRASE"),
-        (settings.anthropic.api_key, "ANTHROPIC_API_KEY"),
     ]
 
     for valor, nombre in checks:
@@ -69,38 +70,39 @@ def validar_credenciales_live() -> None:
 
 class AgentOrchestrator:
     """
-    Orquestador del agente autónomo de trading en Polymarket (async).
+    Orquestador del agente autónomo de copy-trading en Polymarket (async).
+
+    Estrategia principal: COPY-TRADING
+    Copia las posiciones de los mejores traders del leaderboard.
 
     Loop principal:
-    1. Escanear mercados activos
-    2. Recopilar datos (noticias, historial, sentimiento) en paralelo
-    3. Evaluar probabilidades con LLM en paralelo
-    4. Generar señales de trading
-    5. Validar con risk manager
-    6. Ejecutar trades aprobados
-    7. Revisar posiciones existentes
-    8. Reportar actividad
-    9. Dormir hasta próximo ciclo
-
-    Modo Turbo: si un ciclo tarda > 300s, descarta mercados de baja
-    prioridad (bajo volumen/liquidez) y salta la evaluación de LLM
-    para mercados con caché vigente.
+    1. Escanear mercados activos (filtros de liquidez/volumen)
+    2. Consultar leaderboard → top N traders por PnL
+    3. Obtener posiciones de cada top trader (en paralelo)
+    4. Identificar mercados con consenso (múltiples top traders)
+    5. Generar señales de compra para mercados con consenso
+    6. Validar con risk manager
+    7. Ejecutar trades aprobados
+    8. Revisar posiciones existentes (¿siguen los traders posicionados?)
+    9. Liquidar mercados resueltos
+    10. Reportar actividad
     """
 
     def __init__(self) -> None:
         configurar_logging()
-        logger.info("Inicializando agente de Polymarket (async)...")
+        logger.info("Inicializando agente de Polymarket (copy-trading)...")
 
         # Validar credenciales antes de crear componentes costosos
         validar_credenciales_live()
 
         # Componentes async
         self._scanner = MarketScanner()
-        self._collector = DataCollector()
-        self._engine = ProbabilityEngine()
+        self._leaderboard = LeaderboardFetcher()
+
+        # Estrategia copy-trading
+        self._copy_strategy = CopyTradingStrategy(self._leaderboard)
 
         # Componentes sync (CPU-bound, rápidos)
-        self._strategy = TradingStrategy()
         self._risk_manager = RiskManager()
         self._portfolio = Portfolio()
         self._executor = OrderExecutor(self._portfolio, self._risk_manager)
@@ -119,6 +121,7 @@ class AgentOrchestrator:
 
         logger.info(
             f"Agente inicializado en modo {settings.agent.mode.upper()} | "
+            f"Estrategia: COPY-TRADING (top {settings.copy_trading.top_n} traders) | "
             f"Bankroll: ${settings.risk.max_bankroll_usd:.2f}"
         )
 
@@ -130,7 +133,6 @@ class AgentOrchestrator:
         intervalo = settings.agent.scan_interval_minutes * 60
 
         # Configurar shutdown handlers (Windows no soporta add_signal_handler)
-        import sys
         if sys.platform != "win32":
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGINT, signal.SIGTERM):
@@ -144,7 +146,8 @@ class AgentOrchestrator:
 
         self._alerts.agente_iniciado(settings.agent.mode)
         logger.info(
-            f"Agente iniciado. Ciclo cada {settings.agent.scan_interval_minutes} min"
+            f"Agente iniciado (copy-trading). "
+            f"Ciclo cada {settings.agent.scan_interval_minutes} min"
         )
 
         while self._running:
@@ -165,7 +168,7 @@ class AgentOrchestrator:
                 except asyncio.TimeoutError:
                     logger.warning(
                         f"TURBO: Ciclo #{self._ciclo_actual} excedió "
-                        f"{TURBO_CYCLE_TIMEOUT}s. Mercados lentos descartados."
+                        f"{TURBO_CYCLE_TIMEOUT}s. Continuando."
                     )
 
                 # Verificar si toca reporte diario o semanal
@@ -190,7 +193,6 @@ class AgentOrchestrator:
                     f"Ciclo completado en {duracion:.0f}s. "
                     f"Próximo ciclo en {espera / 60:.1f} min"
                 )
-                # Dormir async (permite shutdown rápido)
                 try:
                     await asyncio.sleep(espera)
                 except asyncio.CancelledError:
@@ -204,72 +206,63 @@ class AgentOrchestrator:
         await self._ejecutar_ciclo()
 
     # =========================================================================
-    # Loop principal (async)
+    # Loop principal (async) — COPY-TRADING
     # =========================================================================
 
     async def _ejecutar_ciclo(self) -> None:
-        """Ejecuta un ciclo completo del agente con operaciones en paralelo."""
+        """Ejecuta un ciclo completo del agente con copy-trading."""
 
         # =====================================================================
-        # Paso 1: ESCANEAR mercados activos
+        # Paso 1: ESCANEAR mercados activos (para validación y precios)
         # =====================================================================
-        logger.info("Paso 1: Escaneando mercados...")
+        logger.info("Paso 1: Escaneando mercados activos...")
         mercados = await self._scanner.escanear_mercados()
 
         if not mercados:
             logger.warning("No se encontraron mercados. Saltando ciclo.")
             return
 
-        logger.info(f"  {len(mercados)} mercados encontrados")
+        logger.info(f"  {len(mercados)} mercados activos")
 
         # =====================================================================
-        # Paso 2: RECOPILAR datos para cada mercado (en paralelo)
+        # Paso 2-3: CONSULTAR LEADERBOARD + POSICIONES TOP TRADERS
         # =====================================================================
-        logger.info("Paso 2: Recopilando datos en paralelo...")
-        contextos = await self._collector.recopilar_multiples(
-            mercados, max_news_per_market=5
+        logger.info(
+            f"Pasos 2-3: Consultando leaderboard "
+            f"(top {settings.copy_trading.top_n})..."
         )
 
-        # Filtrar mercados con datos insuficientes
-        contextos_validos = [
-            c for c in contextos if c.data_quality != "poor"
+        # El método obtener_snapshots_completos hace todo:
+        # - Consulta leaderboard
+        # - Obtiene posiciones de cada trader en paralelo
+        # - Obtiene trades recientes en paralelo
+        # (internamente usa asyncio.gather para paralelismo)
+
+        # =====================================================================
+        # Paso 4: GENERAR SEÑALES DE COPY-TRADING
+        # =====================================================================
+        logger.info("Paso 4: Generando señales de copy-trading...")
+
+        # Obtener IDs de mercados donde ya tenemos posición
+        posiciones_propias = [
+            p.market_id
+            for p in self._portfolio.obtener_posiciones_abiertas()
         ]
-        logger.info(
-            f"  {len(contextos_validos)}/{len(contextos)} "
-            f"con datos suficientes"
+
+        señales = await self._copy_strategy.generar_señales_copy(
+            mercados_disponibles=mercados,
+            posiciones_propias=posiciones_propias,
         )
-
-        if not contextos_validos:
-            logger.warning("Sin datos suficientes. Saltando evaluación.")
-            return
-
-        # =====================================================================
-        # Paso 3: EVALUAR probabilidades con LLM (en paralelo)
-        # =====================================================================
-        logger.info("Paso 3: Evaluando probabilidades con LLM en paralelo...")
-        evaluaciones = await self._engine.evaluar_multiples(contextos_validos)
-
-        exitosas = sum(1 for _, e in evaluaciones if e is not None)
-        logger.info(
-            f"  {exitosas}/{len(evaluaciones)} evaluaciones exitosas "
-            f"(cache: {self._engine.cache_stats})"
-        )
-
-        # =====================================================================
-        # Paso 4: GENERAR señales de trading (CPU-bound, instantáneo)
-        # =====================================================================
-        logger.info("Paso 4: Generando señales de trading...")
-        señales = self._strategy.generar_señales_multiples(evaluaciones)
 
         señales_compra = [s for s in señales if s.action == "BUY"]
         logger.info(
-            f"  {len(señales_compra)} señales de compra de {len(señales)} total"
+            f"  {len(señales_compra)} señales de compra generadas"
         )
 
         # =====================================================================
-        # Paso 5 + 6: VALIDAR y EJECUTAR (sync, rápido)
+        # Paso 5-6: VALIDAR y EJECUTAR
         # =====================================================================
-        logger.info("Pasos 5-6: Validando y ejecutando...")
+        logger.info("Pasos 5-6: Validando con risk manager y ejecutando...")
         trades_ejecutados = 0
 
         for señal in señales_compra:
@@ -285,22 +278,17 @@ class AgentOrchestrator:
         logger.info(f"  {trades_ejecutados} trades ejecutados")
 
         # =====================================================================
-        # Paso 7: REVISAR posiciones existentes
+        # Paso 7: REVISAR posiciones existentes (¿siguen los traders?)
         # =====================================================================
         logger.info("Paso 7: Revisando posiciones existentes...")
-        await self._revisar_posiciones()
+        await self._revisar_posiciones_copy()
 
         # =====================================================================
-        # Paso 7.5: LIQUIDAR posiciones de mercados ya resueltos
+        # Paso 8: LIQUIDAR posiciones de mercados ya resueltos
         # =====================================================================
-        logger.info("Paso 7.5: Liquidando posiciones de mercados resueltos...")
+        logger.info("Paso 8: Liquidando posiciones de mercados resueltos...")
         liquidados = self._portfolio.update_settled_trades(mercados)
         if liquidados:
-            # Invalidar caché LLM para mercados resueltos
-            for mid in liquidados:
-                ProbabilityEngine.invalidar_cache_mercado(mid)
-
-            # Devolver capital liberado al executor (paper mode)
             balance_tras_liquidacion = self._executor.obtener_balance()
             self._portfolio.registrar_balance(balance_tras_liquidacion)
             logger.info(
@@ -309,7 +297,7 @@ class AgentOrchestrator:
             )
 
         # =====================================================================
-        # Paso 8: REPORTAR
+        # Paso 9: REPORTAR
         # =====================================================================
         metricas = self._portfolio.calcular_metricas()
         balance = self._executor.obtener_balance()
@@ -323,14 +311,13 @@ class AgentOrchestrator:
             f"posiciones={len(self._portfolio.obtener_posiciones_abiertas())}"
         )
 
-    async def _revisar_posiciones(self) -> None:
+    async def _revisar_posiciones_copy(self) -> None:
         """
-        Revisa posiciones abiertas y ejecuta salidas anticipadas si es necesario.
+        Revisa posiciones abiertas basándose en si los top traders
+        aún mantienen sus posiciones.
 
-        Para cada posición abierta:
-        1. Obtiene precio actualizado del mercado.
-        2. Re-evalúa la probabilidad con el LLM (usa caché 60 min si disponible).
-        3. Si prob < 0.50 o el edge se invirtió, ejecuta SELL inmediato.
+        Si los traders del leaderboard salieron de un mercado,
+        nosotros también salimos.
         """
         posiciones = self._portfolio.obtener_posiciones_abiertas()
 
@@ -342,78 +329,43 @@ class AgentOrchestrator:
         ventas_activas = 0
 
         for pos in posiciones:
-            # ── 1. Obtener mercado actualizado ──────────────────────────────
-            mercado = await self._scanner.obtener_mercado_por_id(pos.market_id)
-            if mercado is None:
-                logger.debug(f"  No se pudo obtener mercado {pos.market_id[:12]}")
-                continue
-
-            # ── 2. Mercados ya resueltos/cerrados: sin acción ───────────────
-            if mercado.resolved or mercado.closed:
-                logger.info(
-                    f"  Mercado resuelto/cerrado: {pos.market_question[:40]}"
-                )
-                continue
-
-            # ── 3. Recopilar contexto fresco (noticias + historial) ─────────
-            try:
-                contexto = await self._collector.recopilar_contexto(
-                    mercado, max_news=3
-                )
-            except Exception as exc:
-                logger.warning(
-                    f"  Error recopilando contexto para "
-                    f"{pos.market_question[:40]}: {exc}"
-                )
-                continue
-
-            # ── 4. Re-evaluar probabilidad con LLM (usa caché si vigente) ───
-            evaluacion = await self._engine.evaluar_mercado(contexto)
-            if evaluacion is None:
-                logger.debug(
-                    f"  LLM no disponible para {pos.market_question[:40]}"
-                )
-                continue
-
-            # ── 5. Precio actual y edge recalculado ──────────────────────────
-            precio_actual = (
-                mercado.yes_price if pos.side == "YES" else mercado.no_price
-            )
-            prob = evaluacion.probability
-
-            if pos.side == "YES":
-                edge_actual = prob - precio_actual
-            else:
-                edge_actual = (1.0 - prob) - precio_actual
-
-            # ── 6. Decisión de salida anticipada ────────────────────────────
-            decision = self._strategy.evaluar_posicion_existente(
-                evaluacion_actual=evaluacion,
-                precio_entrada=pos.entry_price,
-                precio_actual=precio_actual,
+            # Verificar si los top traders aún mantienen posición
+            decision = self._copy_strategy.evaluar_posicion_copy(
+                market_id=pos.market_id,
                 side=pos.side,
             )
 
             if decision != "SELL":
                 logger.debug(
                     f"  HOLD: {pos.market_question[:40]} | "
-                    f"p={prob:.2f} edge={edge_actual:+.3f}"
+                    f"Top traders aún posicionados"
                 )
                 continue
 
-            # ── 7. Ejecutar salida anticipada ────────────────────────────────
-            razon = (
-                f"prob={prob:.2f} < 0.50"
-                if prob < 0.50
-                else f"edge={edge_actual:+.3f} negativo"
-            )
-            logger.warning(
-                f"  SALIDA ACTIVA: {pos.market_question[:45]} | {razon}"
+            # Obtener precio actual del mercado
+            mercado = await self._scanner.obtener_mercado_por_id(pos.market_id)
+            if mercado is None:
+                logger.debug(f"  No se pudo obtener mercado {pos.market_id[:12]}")
+                continue
+
+            if mercado.resolved or mercado.closed:
+                logger.info(
+                    f"  Mercado resuelto/cerrado: {pos.market_question[:40]}"
+                )
+                continue
+
+            precio_actual = (
+                mercado.yes_price if pos.side == "YES" else mercado.no_price
             )
 
-            # Resolver token_id para modo live (CLOB necesita token_id, no condition_id)
+            # Resolver token_id para modo live
             from core.executor import resolver_token_id
             token_id = resolver_token_id(mercado.tokens, pos.side)
+
+            logger.warning(
+                f"  SALIDA COPY: {pos.market_question[:45]} | "
+                f"Top traders salieron de la posición"
+            )
 
             pnl = self._executor.ejecutar_venta_activa(
                 market_id=pos.market_id,
@@ -431,7 +383,7 @@ class AgentOrchestrator:
                 )
 
         if ventas_activas:
-            logger.info(f"  {ventas_activas} salida(s) activa(s) ejecutada(s)")
+            logger.info(f"  {ventas_activas} salida(s) copy ejecutada(s)")
 
     def _verificar_reporte_diario(self) -> None:
         """Envía reporte diario si es la hora configurada."""
@@ -505,7 +457,7 @@ class AgentOrchestrator:
 
         # Cerrar conexiones async
         await self._scanner.close()
-        await self._collector.close()
+        await self._leaderboard.close()
 
         # Notificar
         self._alerts.agente_detenido("Shutdown ordenado")
@@ -520,10 +472,10 @@ class AgentOrchestrator:
 def main() -> None:
     """Inicia el agente autónomo con asyncio."""
     print("""
-    ╔══════════════════════════════════════╗
-    ║   Polymarket Trading Agent v2.0      ║
-    ║   Agente Autónomo (async + turbo)    ║
-    ╚══════════════════════════════════════╝
+    ╔══════════════════════════════════════════════╗
+    ║   Polymarket Copy-Trading Agent v3.0         ║
+    ║   Copia las mejores carteras del leaderboard ║
+    ╚══════════════════════════════════════════════╝
     """)
 
     agente = AgentOrchestrator()
