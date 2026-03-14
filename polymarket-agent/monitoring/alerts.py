@@ -107,11 +107,53 @@ class TelegramAlerts:
         )
         self._enviar(mensaje)
 
+    def copy_señal_generada(
+        self,
+        market_question: str,
+        side: str,
+        traders_count: int,
+        trader_names: list[str],
+        size_usd: float,
+        entry_price: float,
+    ) -> None:
+        """Notifica cuando se genera una señal de copy-trading con consenso."""
+        nombres = ", ".join(trader_names[:3])
+        if len(trader_names) > 3:
+            nombres += f" +{len(trader_names) - 3}"
+        mensaje = (
+            f"🤝 Señal Copy-Trading\n\n"
+            f"📊 {market_question[:80]}\n"
+            f"➡️ BUY {side} @ {entry_price:.3f}\n"
+            f"💰 Tamaño: ${size_usd:.2f}\n"
+            f"👥 {traders_count} traders: {nombres}"
+        )
+        self._enviar(mensaje)
+
+    def copy_salida_ejecutada(
+        self,
+        market_question: str,
+        side: str,
+        pnl: float,
+    ) -> None:
+        """Notifica cuando cerramos posición porque los top traders salieron."""
+        emoji = "📈" if pnl >= 0 else "📉"
+        mensaje = (
+            f"🚪 Salida Copy-Trading\n\n"
+            f"📊 {market_question[:80]}\n"
+            f"➡️ SELL {side}\n"
+            f"{emoji} PnL: ${pnl:+.2f}\n"
+            f"📝 Top traders abandonaron la posición"
+        )
+        self._enviar(mensaje)
+
     def agente_iniciado(self, modo: str) -> None:
         """Notifica que el agente se inició."""
+        ct = settings.copy_trading
         mensaje = (
-            f"🚀 Agente Iniciado\n\n"
+            f"🚀 Agente Iniciado — Copy-Trading\n\n"
             f"📊 Modo: {modo.upper()}\n"
+            f"👥 Siguiendo top {ct.top_n} traders ({ct.leaderboard_window})\n"
+            f"🎯 Consenso mínimo: {ct.min_traders_consensus} traders\n"
             f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"💰 Bankroll: ${settings.risk.max_bankroll_usd:.2f}"
         )

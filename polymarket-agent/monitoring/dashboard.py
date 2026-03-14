@@ -41,14 +41,15 @@ def main() -> None:
     from config import settings
 
     st.set_page_config(
-        page_title="Polymarket Agent",
+        page_title="Polymarket Copy-Trading Agent",
         page_icon="📊",
         layout="wide",
     )
 
-    st.title("📊 Polymarket Agent — Dashboard")
+    st.title("📊 Polymarket Copy-Trading Agent — Dashboard")
     st.caption(
         f"Modo: **{settings.agent.mode.upper()}** | "
+        f"Estrategia: **COPY-TRADING** (top {settings.copy_trading.top_n} traders) | "
         f"Bankroll inicial: **${settings.risk.max_bankroll_usd:,.2f} USD**"
     )
 
@@ -154,9 +155,55 @@ def main() -> None:
     st.divider()
 
     # =========================================================================
-    # Sección 3: Posiciones abiertas con P&L flotante por posición
+    # Sección 3: Copy-Trading — configuración activa y estado de consenso
+    # =========================================================================
+    st.subheader("🤝 Copy-Trading — Configuración Activa")
+
+    ct = settings.copy_trading
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.metric("Top Traders Seguidos", ct.top_n)
+    with c2:
+        st.metric("Consenso Mínimo", f"{ct.min_traders_consensus} traders")
+    with c3:
+        st.metric("Ventana Leaderboard", ct.leaderboard_window)
+    with c4:
+        st.metric("Tamaño Base", f"{ct.copy_size_pct:.0%} bankroll")
+    with c5:
+        st.metric("Rango de Precio", f"{ct.min_entry_price:.0%} – {ct.max_entry_price:.0%}")
+
+    # Tabla de últimas señales de copy (extraídas de trades recientes)
+    trades_recientes = portfolio.obtener_trades_recientes(limit=50)
+    señales_copy = [
+        t for t in trades_recientes
+        if "copy" in (t.get("reasoning") or "").lower()
+        or "traders" in (t.get("reasoning") or "").lower()
+    ]
+    if señales_copy:
+        with st.expander(f"📋 Últimas señales copy-trading ({len(señales_copy)} de últimos 50 trades)"):
+            rows = []
+            for t in señales_copy[:10]:
+                rows.append({
+                    "Mercado": (t.get("market_question") or "")[:55],
+                    "Side": t.get("side", ""),
+                    "Precio": f"${t.get('price', 0):.3f}",
+                    "Tamaño": f"${t.get('size_usd', 0):.2f}",
+                    "Razonamiento": (t.get("reasoning") or "")[:80],
+                })
+            st.table(rows)
+    else:
+        st.info(
+            "Sin señales copy-trading registradas aún. "
+            "Las señales aparecen aquí una vez que el agente ejecute el primer ciclo."
+        )
+
+    st.divider()
+
+    # =========================================================================
+    # Sección 4: Posiciones abiertas con P&L flotante por posición
     # =========================================================================
     st.subheader("📦 Posiciones Abiertas")
+
 
     if posiciones:
         data = []
@@ -181,7 +228,7 @@ def main() -> None:
         st.info("Sin posiciones abiertas")
 
     # =========================================================================
-    # Sección 4: Trades recientes
+    # Sección 5: Trades recientes
     # =========================================================================
     st.subheader("📋 Trades Recientes")
 
@@ -205,7 +252,7 @@ def main() -> None:
         st.info("Sin trades registrados")
 
     # =========================================================================
-    # Sección 5: Equity curve y Drawdown chart
+    # Sección 6: Equity curve y Drawdown chart
     # =========================================================================
     st.subheader("📉 Historial de Balance y Drawdown")
 
@@ -291,7 +338,7 @@ def main() -> None:
         st.info("Sin datos de balance aún. El agente debe registrar al menos un ciclo.")
 
     # =========================================================================
-    # Sección 6: Reporte diario expandible
+    # Sección 7: Reporte diario expandible
     # =========================================================================
     with st.expander("📄 Reporte Diario Detallado"):
         st.code(reporter.generar_reporte_diario())

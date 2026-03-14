@@ -279,6 +279,24 @@ class AgentOrchestrator:
         trades_ejecutados = 0
 
         for señal in señales_compra:
+            # Alerta previa de señal copy (antes de ejecutar)
+            if señal.reasoning and "traders" in señal.reasoning.lower():
+                try:
+                    # Extraer traders_count del reasoning
+                    traders_count = int(
+                        señal.reasoning.split("traders")[0].strip().split()[-1]
+                    )
+                    self._alerts.copy_señal_generada(
+                        market_question=señal.market_question,
+                        side=señal.side,
+                        traders_count=traders_count,
+                        trader_names=[],
+                        size_usd=señal.suggested_size_usd,
+                        entry_price=señal.entry_price,
+                    )
+                except (ValueError, IndexError):
+                    pass
+
             record = self._executor.ejecutar_señal(señal)
             if record:
                 trades_ejecutados += 1
@@ -393,6 +411,11 @@ class AgentOrchestrator:
                 logger.info(
                     f"  Posición cerrada: {pos.market_question[:40]} | "
                     f"PnL ${pnl:+.2f}"
+                )
+                self._alerts.copy_salida_ejecutada(
+                    market_question=pos.market_question,
+                    side=pos.side,
+                    pnl=pnl,
                 )
 
         if ventas_activas:

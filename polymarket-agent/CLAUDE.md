@@ -223,19 +223,42 @@ STOP_LOSS_PCT=0.15         # Exit si posición -15%
 
 ## Cómo Ejecutar
 
+### PowerShell (Windows)
+
+```powershell
+# Paper trading — TRADING_MODE=paper es el default en scripts/paper_trade.py
+python scripts/paper_trade.py
+
+# O explícitamente:
+$env:TRADING_MODE="paper"; python scripts/paper_trade.py
+
+# Live trading
+$env:TRADING_MODE="live"; python scripts/paper_trade.py
+
+# Un solo ciclo (testing)
+python -c "import asyncio; from agent.orchestrator import AgentOrchestrator; asyncio.run(AgentOrchestrator().ejecutar_ciclo_unico())"
+
+# Dashboard
+streamlit run monitoring/dashboard.py
+
+# Tests
+pytest tests/ -v
+```
+
+### Bash / Linux / Mac
+
 ```bash
 # Paper trading (simulación)
-TRADING_MODE=paper python -m agent.orchestrator
+python scripts/paper_trade.py
 
-# Live trading (fondos reales — requiere API keys)
-TRADING_MODE=live python -m agent.orchestrator
+# Live trading
+TRADING_MODE=live python scripts/paper_trade.py
 
 # Un solo ciclo (testing)
 python -c "
 import asyncio
 from agent.orchestrator import AgentOrchestrator
-agente = AgentOrchestrator()
-asyncio.run(agente.ejecutar_ciclo_unico())
+asyncio.run(AgentOrchestrator().ejecutar_ciclo_unico())
 "
 
 # Dashboard
