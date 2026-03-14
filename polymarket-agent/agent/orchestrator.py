@@ -116,6 +116,7 @@ class AgentOrchestrator:
 
         # Estado
         self._running = False
+        self._shutdown_event = asyncio.Event()
         self._ciclo_actual = 0
         self._ultimo_reporte = datetime.now()
         self._ultimo_reporte_semanal = datetime.now()
@@ -206,8 +207,16 @@ class AgentOrchestrator:
                     f"Ciclo completado en {duracion:.0f}s. "
                     f"Próximo ciclo en {espera / 60:.1f} min"
                 )
+                # Esperar con evento cancelable (Ctrl+C lo interrumpe al instante)
                 try:
-                    await asyncio.sleep(espera)
+                    await asyncio.wait_for(
+                        self._shutdown_event.wait(), timeout=espera
+                    )
+                    # Si el event se activó, es shutdown
+                    break
+                except asyncio.TimeoutError:
+                    # Timeout normal → siguiente ciclo
+                    pass
                 except asyncio.CancelledError:
                     break
 
@@ -472,11 +481,13 @@ class AgentOrchestrator:
         """Maneja señales de shutdown en modo async (Unix)."""
         logger.info("Señal de shutdown recibida. Deteniendo...")
         self._running = False
+        self._shutdown_event.set()
 
     def _manejar_shutdown_signal(self, signum: int, frame: Any) -> None:
         """Maneja señales de shutdown via signal.signal (Windows)."""
         logger.info(f"Señal {signum} recibida. Deteniendo...")
         self._running = False
+        self._shutdown_event.set()
 
     async def _shutdown(self) -> None:
         """Cierra todos los componentes de forma ordenada."""
