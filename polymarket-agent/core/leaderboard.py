@@ -135,14 +135,14 @@ class LeaderboardFetcher:
 
         # Mapear parámetros al formato v1 de la API
         time_period_map = {
-            "1d": "day", "7d": "week", "30d": "month", "all": "all",
-            "day": "day", "week": "week", "month": "month",
+            "1d": "DAY", "7d": "WEEK", "30d": "MONTH", "all": "ALL",
+            "day": "DAY", "week": "WEEK", "month": "MONTH",
         }
         order_by_map = {
             "profit": "PNL", "volume": "VOL",
             "pnl": "PNL", "vol": "VOL",
         }
-        api_period = time_period_map.get(window.lower(), "all")
+        api_period = time_period_map.get(window.lower(), "ALL")
         api_order = order_by_map.get(rank_by.lower(), "PNL")
 
         data = await self._hacer_request(
