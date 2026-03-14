@@ -133,11 +133,25 @@ class LeaderboardFetcher:
             f"rankBy={rank_by}"
         )
 
+        # Mapear parámetros al formato v1 de la API
+        time_period_map = {
+            "1d": "day", "7d": "week", "30d": "month", "all": "all",
+            "day": "day", "week": "week", "month": "month",
+        }
+        order_by_map = {
+            "profit": "PNL", "volume": "VOL",
+            "pnl": "PNL", "vol": "VOL",
+        }
+        api_period = time_period_map.get(window.lower(), "all")
+        api_order = order_by_map.get(rank_by.lower(), "PNL")
+
         data = await self._hacer_request(
-            "/leaderboard",
+            "/v1/leaderboard",
             params={
-                "window": window,
-                "rankBy": rank_by,
+                "timePeriod": api_period,
+                "orderBy": api_order,
+                "limit": str(min(n, 50)),
+                "offset": "0",
             },
         )
 
@@ -378,14 +392,12 @@ class LeaderboardFetcher:
 
         if isinstance(data, list):
             return data
-        if isinstance(data, dict) and "data" in data:
-            return data["data"]
-        if isinstance(data, dict) and "positions" in data:
-            return data["positions"]
-        if isinstance(data, dict) and "history" in data:
-            return data["history"]
         if isinstance(data, dict):
-            # Algunos endpoints retornan un dict directo
+            # Buscar la lista de resultados en keys conocidas
+            for key in ("data", "rankings", "leaderboard", "positions", "history"):
+                if key in data and isinstance(data[key], list):
+                    return data[key]
+            # Dict directo (ej: un solo resultado)
             return [data]
         return []
 
@@ -405,14 +417,26 @@ class LeaderboardFetcher:
             return TopTrader(
                 wallet=wallet,
                 username=(
-                    entry.get("name", "")
+                    entry.get("userName", "")
+                    or entry.get("name", "")
                     or entry.get("pseudonym", "")
                     or entry.get("username", "")
                 ),
-                profile_image=entry.get("profileImage", ""),
-                profit=float(entry.get("profit", 0) or 0),
-                volume=float(entry.get("volume", 0) or 0),
-                rank=rank,
+                profile_image=(
+                    entry.get("profileImage", "")
+                    or entry.get("profile_image", "")
+                ),
+                profit=float(
+                    entry.get("pnl", 0)
+                    or entry.get("profit", 0)
+                    or 0
+                ),
+                volume=float(
+                    entry.get("vol", 0)
+                    or entry.get("volume", 0)
+                    or 0
+                ),
+                rank=int(entry.get("rank", 0) or 0) or rank,
                 markets_traded=int(entry.get("marketsTraded", 0) or 0),
             )
         except Exception as e:
