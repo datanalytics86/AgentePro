@@ -661,6 +661,21 @@ class OrderExecutor:
         if signal.suggested_size_usd < 1.0:
             return False, "Tamaño demasiado pequeño (< $1)"
 
+        # Check 4: Precio de entrada mínimo (hard floor, no configurable)
+        # Tokens a <3% son apuestas de lotería con EV negativo.
+        HARD_MIN_PRICE = 0.03
+        HARD_MAX_PRICE = 0.97
+        if signal.entry_price < HARD_MIN_PRICE:
+            return False, (
+                f"Precio demasiado bajo: {signal.entry_price:.4f} "
+                f"< {HARD_MIN_PRICE} (hard floor)"
+            )
+        if signal.entry_price > HARD_MAX_PRICE:
+            return False, (
+                f"Precio demasiado alto: {signal.entry_price:.4f} "
+                f"> {HARD_MAX_PRICE} (hard ceiling)"
+            )
+
         return True, "OK"
 
     def _verificar_riesgo(self, signal: TradeSignal) -> tuple[bool, str]:

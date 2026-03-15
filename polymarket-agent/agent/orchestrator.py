@@ -135,12 +135,13 @@ class AgentOrchestrator:
         intervalo = settings.agent.scan_interval_minutes * 60
 
         # Configurar shutdown handlers
+        self._loop = asyncio.get_running_loop()
         if sys.platform != "win32":
-            loop = asyncio.get_running_loop()
             for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, self._manejar_shutdown_async)
+                self._loop.add_signal_handler(sig, self._manejar_shutdown_async)
         else:
-            # Windows: usar signal.signal para SIGINT (Ctrl+C)
+            # Windows: signal.signal corre fuera del event loop,
+            # por eso usamos call_soon_threadsafe en el handler.
             signal.signal(signal.SIGINT, self._manejar_shutdown_signal)
             signal.signal(signal.SIGTERM, self._manejar_shutdown_signal)
 
@@ -484,10 +485,15 @@ class AgentOrchestrator:
         self._shutdown_event.set()
 
     def _manejar_shutdown_signal(self, signum: int, frame: Any) -> None:
-        """Maneja señales de shutdown via signal.signal (Windows)."""
+        """Maneja señales de shutdown via signal.signal (Windows).
+
+        signal.signal() corre fuera del event loop thread, así que
+        asyncio.Event.set() no es thread-safe. Usamos call_soon_threadsafe
+        para programar el set() dentro del loop.
+        """
         logger.info(f"Señal {signum} recibida. Deteniendo...")
         self._running = False
-        self._shutdown_event.set()
+        self._loop.call_soon_threadsafe(self._shutdown_event.set)
 
     async def _shutdown(self) -> None:
         """Cierra todos los componentes de forma ordenada."""

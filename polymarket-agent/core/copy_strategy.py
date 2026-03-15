@@ -114,19 +114,47 @@ class CopyTradingStrategy:
                 # Si no pudimos determinar el side, usar YES por default
                 side = "YES"
 
+            # Obtener precio real del token (no el default 0.5)
+            # Para mercados binarios YES/NO, yes_price/no_price son correctos.
+            # Para mercados multi-outcome, los tokens no se llaman "Yes"/"No",
+            # así que yes_price queda en 0.5 (default) — usamos el precio
+            # del token que coincide con el side, o el consenso avg_price.
             entry_price = (
                 mercado.yes_price if side == "YES" else mercado.no_price
             )
 
+            # Si el precio es el default (0.5), verificar con los tokens reales
+            # y con el precio promedio del consenso para detectar mercados
+            # multi-outcome donde yes_price/no_price no son confiables.
+            if abs(entry_price - 0.5) < 0.001:
+                # Revisar si realmente hay un token YES/NO
+                has_binary_tokens = any(
+                    t.outcome.upper() in ("YES", "NO")
+                    for t in mercado.tokens
+                )
+                if not has_binary_tokens:
+                    # Mercado multi-outcome: usar precio del consenso
+                    consensus_price = consenso.get("avg_price", 0)
+                    if consensus_price > 0:
+                        entry_price = consensus_price
+                        logger.info(
+                            f"Multi-outcome {consenso['title'][:35]}: "
+                            f"usando consensus price {entry_price:.3f}"
+                        )
+
             # No comprar tokens demasiado caros (>95%) ni demasiado baratos (<5%)
+            # Hard floor: nunca comprar a menos de 3% independiente de config
+            effective_min = max(self._config.min_entry_price, 0.03)
             if entry_price > self._config.max_entry_price:
-                logger.debug(
-                    f"Skip {consenso['title'][:40]}: precio {entry_price:.2f} > max"
+                logger.info(
+                    f"Skip {consenso['title'][:40]}: precio {entry_price:.3f} "
+                    f"> max {self._config.max_entry_price}"
                 )
                 continue
-            if entry_price < self._config.min_entry_price:
-                logger.debug(
-                    f"Skip {consenso['title'][:40]}: precio {entry_price:.2f} < min"
+            if entry_price < effective_min:
+                logger.info(
+                    f"Skip {consenso['title'][:40]}: precio {entry_price:.3f} "
+                    f"< min {effective_min}"
                 )
                 continue
 
