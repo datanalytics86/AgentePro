@@ -61,7 +61,7 @@ class TraderTrade(BaseModel):
     price: float = Field(default=0.0, description="Precio de ejecución")
     size: float = Field(default=0.0, description="Tamaño en shares")
     cash_amount: float = Field(default=0.0, description="Monto en USD")
-    timestamp: str = Field(default="", description="Timestamp ISO del trade")
+    timestamp: str | int = Field(default="", description="Timestamp del trade (ISO string o unix int)")
     asset: str = Field(default="", description="Token asset ID")
 
 
