@@ -267,7 +267,11 @@ class LiveExecutor(BaseExecutor):
             )
             raise
         except Exception as e:
-            logger.error(f"Error creando cliente CLOB: {e}")
+            logger.error(
+                f"Error creando cliente CLOB: {e}\n"
+                "  → Verifica que POLYMARKET_PRIVATE_KEY sea un hex válido (64 chars, sin 0x).\n"
+                "  → Si no tienes keys, usa modo paper: TRADING_MODE=paper"
+            )
             raise
 
     def ejecutar_orden(
