@@ -470,6 +470,10 @@ class LeaderboardFetcher:
                 elif outcome.lower() in ("short", "sell"):
                     side = "NO"
 
+            # Sin side determinado no sirve para consenso
+            if not side:
+                return None
+
             return TraderPosition(
                 market_id=market_id,
                 title=entry.get("title", entry.get("question", "")),
@@ -492,7 +496,8 @@ class LeaderboardFetcher:
         try:
             # Filtrar solo trades (no splits, merges, redeems)
             activity_type = entry.get("type", "trade").lower()
-            if activity_type not in ("trade", "buy", "sell"):
+            non_trade_types = ("split", "merge", "redeem", "deposit", "withdraw")
+            if activity_type in non_trade_types:
                 return None
 
             market_id = (
@@ -500,6 +505,8 @@ class LeaderboardFetcher:
                 or entry.get("market", "")
                 or entry.get("condition_id", "")
             )
+            if not market_id:
+                return None
 
             return TraderTrade(
                 market_id=market_id,
