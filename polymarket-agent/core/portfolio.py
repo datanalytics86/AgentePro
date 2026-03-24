@@ -473,8 +473,10 @@ class Portfolio:
                 continue
 
             # Determinar si el resultado YES ganó buscando en los tokens
+            # Primero busca winner explícito, luego infiere del precio final
             resolucion_yes = any(
-                t.outcome.lower() == "yes" and t.winner is True
+                t.outcome.lower() == "yes"
+                and (t.winner is True or (t.winner is None and t.price >= 0.95))
                 for t in mercado.tokens
             )
 

@@ -225,16 +225,32 @@ class MarketScanner:
         if not outcomes or not outcome_prices:
             return None
 
+        # Determinar si el mercado está resuelto para parsear winners
+        is_resolved = not bool(raw.get("active", True)) and bool(
+            raw.get("closed", False)
+        )
+
         # Construir tokens
         tokens: list[Token] = []
         for i, outcome in enumerate(outcomes):
             token_id = clob_token_ids[i] if i < len(clob_token_ids) else ""
             price = float(outcome_prices[i]) if i < len(outcome_prices) else 0.5
+
+            # Determinar winner: campo explícito o inferido del precio final
+            winner = None
+            if is_resolved:
+                # Precio ~1.0 = ganador, ~0.0 = perdedor
+                if price >= 0.95:
+                    winner = True
+                elif price <= 0.05:
+                    winner = False
+
             tokens.append(
                 Token(
                     token_id=token_id,
                     outcome=outcome,
                     price=price,
+                    winner=winner,
                 )
             )
 
