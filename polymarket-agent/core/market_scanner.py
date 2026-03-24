@@ -225,10 +225,10 @@ class MarketScanner:
         if not outcomes or not outcome_prices:
             return None
 
-        # Determinar si el mercado está resuelto para parsear winners
-        is_resolved = not bool(raw.get("active", True)) and bool(
-            raw.get("closed", False)
-        )
+        # Determinar si el mercado está resuelto/cerrado para parsear winners.
+        # La Gamma API puede tener active=True + closed=True en mercados
+        # recién resueltos, así que basta con closed=True para inferir.
+        is_closed = bool(raw.get("closed", False))
 
         # Construir tokens
         tokens: list[Token] = []
@@ -238,7 +238,7 @@ class MarketScanner:
 
             # Determinar winner: campo explícito o inferido del precio final
             winner = None
-            if is_resolved:
+            if is_closed:
                 # Precio ~1.0 = ganador, ~0.0 = perdedor
                 if price >= 0.95:
                     winner = True

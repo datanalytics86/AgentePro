@@ -469,7 +469,7 @@ class Portfolio:
 
         for pos in posiciones:
             mercado = mapa.get(pos.market_id)
-            if mercado is None or not mercado.resolved:
+            if mercado is None or not (mercado.resolved or mercado.closed):
                 continue
 
             # Determinar si el resultado YES ganó buscando en los tokens
