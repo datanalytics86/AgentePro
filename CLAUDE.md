@@ -294,7 +294,7 @@ pytest tests/ -v
 
 ### Resumen
 
-Se corrigieron **7 bugs** en 4 commits que impedían la operación del agente.
+Se corrigieron **8 bugs** en 5 commits que impedían la operación del agente.
 Antes de estos fixes, el ciclo terminaba con **0 señales generadas** y las
 posiciones de mercados resueltos **nunca se liquidaban**.
 
@@ -308,7 +308,8 @@ posiciones de mercados resueltos **nunca se liquidaban**.
 | 4 | Posiciones sin campo `side` determinable contaminaban el consenso con side="" | MEDIO | `leaderboard.py` | 3/4 |
 | 5 | Trades sin `market_id` se procesaban innecesariamente | MEDIO | `leaderboard.py` | 3/4 |
 | 6 | Filtro de `type` en actividad usaba whitelist demasiado restrictiva | MEDIO | `leaderboard.py` | 3/4 |
-| 7 | `Token.winner` nunca se parseaba del JSON → `update_settled_trades()` nunca liquidaba | **CRITICO** | `market_scanner.py` + `portfolio.py` | 4/4 |
+| 7 | `Token.winner` nunca se parseaba del JSON → `update_settled_trades()` nunca liquidaba | **CRITICO** | `market_scanner.py` + `portfolio.py` | 4/5 |
+| 8 | Gamma API devuelve `active=True + closed=True` en mercados recién resueltos → `resolved=False` → no se liquidan | **CRITICO** | `market_scanner.py` + `portfolio.py` | 5/5 |
 
 ### Detalle de las Correcciones
 
@@ -342,6 +343,15 @@ El parser del scanner construía Token sin `winner=...`, quedando siempre None.
 **Fix dual**:
 1. Scanner: infiere winner desde precio final (>= 0.95 → True, <= 0.05 → False)
 2. Portfolio: fallback en `update_settled_trades()` usa precio si winner es None
+
+**Bug 8 — active=True + closed=True no detectado** (`market_scanner.py` + `portfolio.py`):
+La Gamma API puede devolver `active=True, closed=True` para mercados recién
+resueltos. El flag `resolved` se calculaba como `not active AND closed`, así
+que era `False` en estos casos. El scanner solo infería `Token.winner` cuando
+`is_resolved=True`, y `update_settled_trades()` solo liquidaba si `resolved`.
+**Fix dual**:
+1. Scanner: infiere winner cuando `closed=True` (no solo cuando `resolved=True`)
+2. Portfolio: `update_settled_trades()` acepta `resolved OR closed`
 
 ### Flujo del Ciclo Post-Fix (v3.1)
 
