@@ -199,12 +199,16 @@ STOP_LOSS_PCT=0.15         # Exit si posición -15%
   Ya no usa `DataCollector`, `ProbabilityEngine`, ni `TradingStrategy` legacy.
   Usa `LeaderboardFetcher` y `CopyTradingStrategy` en su lugar.
 
-### Existentes (sin cambios)
+### Existentes (modificados en v3.1 bugfix)
 
 - **`core/models.py`** — Mismos modelos Pydantic (Market, TradeSignal, etc.)
-- **`core/market_scanner.py`** — Mismo scanner de mercados via Gamma API
+- **`core/market_scanner.py`** — Scanner de mercados via Gamma API.
+  **v3.1**: Ahora infiere `Token.winner` desde el precio final cuando el
+  mercado está resuelto (price >= 0.95 → winner, <= 0.05 → loser).
 - **`core/risk_manager.py`** — Mismas reglas de riesgo INAMOVIBLES
-- **`core/portfolio.py`** — Mismo tracking SQLite con WAL mode
+- **`core/portfolio.py`** — Portfolio tracking con SQLite (WAL mode).
+  **v3.1**: `update_settled_trades()` usa fallback de precio para inferir
+  ganador cuando `token.winner` es None.
 - **`core/executor.py`** — Mismo executor Paper/Live
 
 ### Legacy (aún disponibles pero no usados por el orquestador)
@@ -218,21 +222,21 @@ STOP_LOSS_PCT=0.15         # Exit si posición -15%
 - Balance inicial: $500.00
 - Balance actual: ~$525.21 (+5.04%)
 - PnL realizado: +$9.33
-- Posiciones abiertas: 9
-- Los últimos ciclos estaban paralizados por bugs (ya corregidos)
+- Posiciones abiertas: 9 (pendiente liquidación de mercados resueltos)
+- **Estado del agente: OPERATIVO al 100%** (todos los bugs corregidos, 190 tests pasan)
 
 ## Cómo Ejecutar
 
 ### PowerShell (Windows)
 
 ```powershell
-# Paper trading — TRADING_MODE=paper es el default en scripts/paper_trade.py
+# Paper trading (simulación) — TRADING_MODE=paper es el default
 python scripts/paper_trade.py
 
 # O explícitamente:
 $env:TRADING_MODE="paper"; python scripts/paper_trade.py
 
-# Live trading
+# Live trading (fondos reales — requiere API keys)
 $env:TRADING_MODE="live"; python scripts/paper_trade.py
 
 # Un solo ciclo (testing)
@@ -286,6 +290,79 @@ pytest tests/ -v
    probability engine, strategy) siguen disponibles por si se quiere hacer
    un modo híbrido en el futuro.
 
+## Historial de Bugfixes — Sesión 2024-03-24 (v3.1)
+
+### Resumen
+
+Se corrigieron **7 bugs** en 4 commits que impedían la operación del agente.
+Antes de estos fixes, el ciclo terminaba con **0 señales generadas** y las
+posiciones de mercados resueltos **nunca se liquidaban**.
+
+### Bugs Corregidos
+
+| # | Bug | Severidad | Archivo | Commit |
+|---|-----|-----------|---------|--------|
+| 1 | `TraderTrade.timestamp` solo aceptaba `str`, pero la Data API devuelve `int` (epoch) | ALTO | `leaderboard.py` | 1/4 |
+| 2 | Scanner trae ~20 mercados, pero consenso tiene ~52+ mercados → 0 señales por no encontrar mercado | **CRITICO** | `orchestrator.py` | 2/4 |
+| 3 | Posiciones abiertas en mercados ya cerrados nunca se detectaban como resueltas | ALTO | `orchestrator.py` | 2/4 |
+| 4 | Posiciones sin campo `side` determinable contaminaban el consenso con side="" | MEDIO | `leaderboard.py` | 3/4 |
+| 5 | Trades sin `market_id` se procesaban innecesariamente | MEDIO | `leaderboard.py` | 3/4 |
+| 6 | Filtro de `type` en actividad usaba whitelist demasiado restrictiva | MEDIO | `leaderboard.py` | 3/4 |
+| 7 | `Token.winner` nunca se parseaba del JSON → `update_settled_trades()` nunca liquidaba | **CRITICO** | `market_scanner.py` + `portfolio.py` | 4/4 |
+
+### Detalle de las Correcciones
+
+**Bug 1 — Timestamp int vs str** (`leaderboard.py:_parsear_trade`):
+La Data API devuelve `timestamp` como int (epoch seconds) en algunos trades.
+El modelo `TraderTrade` solo aceptaba `str`. Se cambió a `str | int` con
+conversión automática.
+
+**Bug 2 — 0 señales por mercados faltantes** (`orchestrator.py:_ejecutar_ciclo`):
+El scanner trae ~20 mercados top por volumen, pero los top traders están
+posicionados en ~52+ mercados distintos. Al no encontrar el mercado en el
+índice, `generar_señales_desde_consenso()` los descartaba todos.
+**Fix**: Paso 4a en el orquestador busca individualmente (hasta 40 en paralelo)
+los mercados de consenso que faltan via `obtener_mercado_por_id()`.
+
+**Bug 3 — Posiciones stale nunca resueltas** (`orchestrator.py:_revisar_posiciones_copy`):
+`_revisar_posiciones_copy()` solo verificaba mercados del scanner (activos),
+no los de posiciones propias que pueden estar cerrados/resueltos.
+**Fix**: Se buscan los mercados de posiciones abiertas individualmente y se
+agregan a la lista para `update_settled_trades()`.
+
+**Bug 4-6 — Datos sucios del leaderboard** (`leaderboard.py`):
+- Posiciones sin side: se filtran en `_parsear_posicion()` (return None si no YES/NO)
+- Trades sin market_id: se filtran en `_parsear_trade()` (return None si vacío)
+- Filtro de type: cambiado de whitelist (`trade`, `buy`, `sell`) a blacklist
+  (`split`, `merge`, `redeem`, `deposit`, `withdraw`)
+
+**Bug 7 — Token.winner siempre None** (`market_scanner.py` + `portfolio.py`):
+El parser del scanner construía Token sin `winner=...`, quedando siempre None.
+`update_settled_trades()` comparaba `t.winner is True` → siempre False.
+**Fix dual**:
+1. Scanner: infiere winner desde precio final (>= 0.95 → True, <= 0.05 → False)
+2. Portfolio: fallback en `update_settled_trades()` usa precio si winner es None
+
+### Flujo del Ciclo Post-Fix (v3.1)
+
+```
+1. ESCANEAR ~20 mercados top por volumen (Gamma API)
+2. CONSULTAR LEADERBOARD → top 20 traders + posiciones en paralelo
+3. IDENTIFICAR CONSENSO → ~52 mercados con 3+ traders coincidiendo
+4a. ENRIQUECER → buscar ~32 mercados faltantes individualmente (paralelo, max 40)
+4b. GENERAR SEÑALES desde consenso enriquecido (ahora SÍ genera señales)
+5-6. VALIDAR risk manager + EJECUTAR trades aprobados
+7. REVISAR posiciones → ¿siguen los top traders? Si no → SELL
+   + Buscar mercados de posiciones propias individualmente
+8. LIQUIDAR mercados resueltos (ahora SÍ detecta ganadores por precio)
+9. REPORTAR métricas
+```
+
+### Tests
+
+- **190 tests pasan** (pytest tests/ -v)
+- Cobertura: models, scanner, portfolio, leaderboard, copy_strategy, risk_manager
+
 ## Próximos Pasos Potenciales
 
 - [ ] Filtrar traders del leaderboard por win rate mínimo (no solo PnL)
@@ -294,3 +371,5 @@ pytest tests/ -v
 - [ ] Dashboard: mostrar leaderboard y posiciones de top traders
 - [ ] Modo híbrido: usar LLM como filtro adicional sobre las señales de copy
 - [ ] Tracking de performance: comparar nuestro P&L vs top traders copiados
+- [ ] Batch fetch de mercados en Gamma API (comma-separated condition_ids)
+- [ ] Optimizar enrichment: cachear mercados ya consultados entre ciclos
