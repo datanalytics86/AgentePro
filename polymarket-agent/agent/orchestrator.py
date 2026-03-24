@@ -255,14 +255,58 @@ class AgentOrchestrator:
             f"(top {settings.copy_trading.top_n})..."
         )
 
-        # El método obtener_snapshots_completos hace todo:
-        # - Consulta leaderboard
-        # - Obtiene posiciones de cada trader en paralelo
-        # - Obtiene trades recientes en paralelo
-        # (internamente usa asyncio.gather para paralelismo)
+        snapshots = await self._leaderboard.obtener_snapshots_completos(
+            top_n=settings.copy_trading.top_n,
+            window=settings.copy_trading.leaderboard_window,
+        )
+
+        if not snapshots:
+            logger.warning("No se obtuvieron snapshots del leaderboard.")
+            return
+
+        # Identificar consensos
+        consensos = self._leaderboard.identificar_mercados_consenso(
+            min_traders=settings.copy_trading.min_traders_consensus,
+        )
 
         # =====================================================================
-        # Paso 4: GENERAR SEÑALES DE COPY-TRADING
+        # Paso 4a: ENRIQUECER mercados — buscar los que faltan
+        # =====================================================================
+        # El scanner solo trae los top N mercados por volumen, pero los top
+        # traders pueden estar posicionados en mercados fuera de ese set.
+        # Buscamos individualmente los mercados de consenso que faltan.
+        mercados_index = {m.condition_id: m for m in mercados}
+        consensus_ids_faltantes = [
+            c["market_id"]
+            for c in consensos
+            if c["market_id"] not in mercados_index
+        ]
+
+        if consensus_ids_faltantes:
+            logger.info(
+                f"  Buscando {len(consensus_ids_faltantes)} mercados de "
+                f"consenso no incluidos en el escaneo..."
+            )
+            # Limitar a 40 búsquedas paralelas para no saturar la API
+            lote = consensus_ids_faltantes[:40]
+            resultados = await asyncio.gather(
+                *[self._scanner.obtener_mercado_por_id(mid) for mid in lote],
+                return_exceptions=True,
+            )
+            encontrados = 0
+            for r in resultados:
+                if isinstance(r, Exception):
+                    continue
+                if r is not None:
+                    mercados.append(r)
+                    encontrados += 1
+            logger.info(
+                f"  {encontrados} mercados adicionales obtenidos "
+                f"(total: {len(mercados)})"
+            )
+
+        # =====================================================================
+        # Paso 4b: GENERAR SEÑALES DE COPY-TRADING
         # =====================================================================
         logger.info("Paso 4: Generando señales de copy-trading...")
 
@@ -272,7 +316,8 @@ class AgentOrchestrator:
             for p in self._portfolio.obtener_posiciones_abiertas()
         ]
 
-        señales = await self._copy_strategy.generar_señales_copy(
+        señales = self._copy_strategy.generar_señales_desde_consenso(
+            consensos=consensos,
             mercados_disponibles=mercados,
             posiciones_propias=posiciones_propias,
         )
@@ -328,6 +373,36 @@ class AgentOrchestrator:
         # Paso 8: LIQUIDAR posiciones de mercados ya resueltos
         # =====================================================================
         logger.info("Paso 8: Liquidando posiciones de mercados resueltos...")
+
+        # El scanner solo trae mercados activos, así que los resueltos no
+        # están en la lista. Buscamos individualmente cada posición abierta
+        # que no esté ya en la lista de mercados.
+        mercados_index_actual = {m.condition_id: m for m in mercados}
+        posiciones_abiertas = self._portfolio.obtener_posiciones_abiertas()
+        pos_ids_faltantes = [
+            p.market_id
+            for p in posiciones_abiertas
+            if p.market_id not in mercados_index_actual
+        ]
+
+        if pos_ids_faltantes:
+            logger.info(
+                f"  Buscando estado de {len(pos_ids_faltantes)} mercados "
+                f"con posiciones abiertas..."
+            )
+            pos_resultados = await asyncio.gather(
+                *[
+                    self._scanner.obtener_mercado_por_id(mid)
+                    for mid in pos_ids_faltantes
+                ],
+                return_exceptions=True,
+            )
+            for r in pos_resultados:
+                if isinstance(r, Exception):
+                    continue
+                if r is not None:
+                    mercados.append(r)
+
         liquidados = self._portfolio.update_settled_trades(mercados)
         if liquidados:
             balance_tras_liquidacion = self._executor.obtener_balance()

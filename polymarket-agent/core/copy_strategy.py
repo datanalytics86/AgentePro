@@ -56,6 +56,10 @@ class CopyTradingStrategy:
         """
         Genera señales de copy-trading basadas en el leaderboard.
 
+        Versión que obtiene snapshots internamente. Para el flujo
+        donde el orquestador ya pre-cargó snapshots y consensos,
+        usar generar_señales_desde_consenso() directamente.
+
         Args:
             mercados_disponibles: Mercados activos del scanner (para validar).
             posiciones_propias: Lista de market_ids donde ya tenemos posición.
@@ -84,9 +88,36 @@ class CopyTradingStrategy:
             logger.info("Sin mercados con consenso suficiente.")
             return []
 
+        # Paso 3: Generar señales desde consensos
+        return self.generar_señales_desde_consenso(
+            consensos=consensos,
+            mercados_disponibles=mercados_disponibles,
+            posiciones_propias=posiciones_propias,
+        )
+
+    def generar_señales_desde_consenso(
+        self,
+        consensos: list[dict[str, Any]],
+        mercados_disponibles: list[Market],
+        posiciones_propias: list[str],
+    ) -> list[TradeSignal]:
+        """
+        Genera señales de copy-trading desde consensos pre-computados.
+
+        Usado por el orquestador cuando ya obtuvo snapshots y consensos
+        previamente (para poder enriquecer la lista de mercados con los
+        que faltan antes de generar señales).
+
+        Args:
+            consensos: Lista de consensos del leaderboard.
+            mercados_disponibles: Mercados (escaneados + enriquecidos).
+            posiciones_propias: Lista de market_ids donde ya tenemos posición.
+
+        Returns:
+            Lista de TradeSignal con las recomendaciones de copy.
+        """
         logger.info(f"Mercados con consenso: {len(consensos)}")
 
-        # Paso 3: Filtrar y generar señales
         # Crear índice de mercados disponibles para validación
         mercados_index = {m.condition_id: m for m in mercados_disponibles}
 
