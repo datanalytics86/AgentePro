@@ -317,7 +317,7 @@ class CopyTradingStrategy:
 
         # Boost por consenso adicional
         extra_traders = max(0, traders_count - min_consensus)
-        boost_pct = extra_traders * 0.01  # +1% por trader extra
+        boost_pct = extra_traders * 0.02  # +2% por trader extra
 
         total_pct = min(
             base_pct + boost_pct,

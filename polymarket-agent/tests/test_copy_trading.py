@@ -514,23 +514,23 @@ class TestCopyTradingStrategy:
     def test_calcular_size_base(self):
         strategy, _ = self._make_strategy_with_mocked_leaderboard()
 
-        # Con 3 traders (mínimo), solo aplica base_pct (3% de $500 = $15)
+        # Con 3 traders (mínimo), solo aplica base_pct (5% de $60 = $3)
         size = strategy._calcular_size(traders_count=3, entry_price=0.5)
-        assert size == 15.0
+        assert size == 3.0
 
     def test_calcular_size_con_boost(self):
         strategy, _ = self._make_strategy_with_mocked_leaderboard()
 
-        # Con 5 traders: base 3% + 2 extra * 1% = 5% (cap). $500 * 5% = $25
+        # Con 5 traders: base 5% + 2 extra * 2% = 9% → $60 * 9% = $5.40
         size = strategy._calcular_size(traders_count=5, entry_price=0.5)
-        assert size == 25.0
+        assert size == 5.4
 
     def test_calcular_size_cap(self):
         strategy, _ = self._make_strategy_with_mocked_leaderboard()
 
-        # Con 10 traders: base 3% + 7*1% = 10%, pero cap es 5% → $25
+        # Con 10 traders: base 5% + 7*2% = 19%, pero cap es 10% → $60 * 10% = $6
         size = strategy._calcular_size(traders_count=10, entry_price=0.5)
-        assert size == 25.0
+        assert size == 6.0
 
 
 # =============================================================================

@@ -36,7 +36,7 @@ class TestRiskManager:
             estimated_probability=0.65,
             edge=0.15,
             confidence="high",
-            suggested_size_usd=10.0,
+            suggested_size_usd=5.0,
             kelly_fraction=0.02,
             reasoning="test",
         )
@@ -47,8 +47,8 @@ class TestRiskManager:
         """Aprueba un trade que cumple todos los límites."""
         aprobado, razon = rm.aprobar_trade(
             signal=signal_basica,
-            balance_actual=400.0,
-            exposicion_total=50.0,
+            balance_actual=50.0,
+            exposicion_total=5.0,
             exposicion_mercado=0.0,
             exposicion_categoria=0.0,
             perdida_diaria=0.0,
@@ -64,7 +64,7 @@ class TestRiskManager:
         """Rechaza si no hay balance suficiente."""
         aprobado, razon = rm.aprobar_trade(
             signal=signal_basica,
-            balance_actual=5.0,  # < 10 USD
+            balance_actual=2.0,  # < 5 USD
             exposicion_total=0.0,
             exposicion_mercado=0.0,
             exposicion_categoria=0.0,
@@ -78,16 +78,16 @@ class TestRiskManager:
     def test_rechazar_excede_max_por_trade(
         self, rm: RiskManager
     ) -> None:
-        """Rechaza si excede el máximo por trade (5% de 500 = $25)."""
+        """Rechaza si excede el máximo por trade (10% de 60 = $6)."""
         signal = TradeSignal(
             market_id="0xtest", market_question="Test?",
             side="YES", action="BUY", entry_price=0.50,
             estimated_probability=0.65, edge=0.15, confidence="high",
-            suggested_size_usd=30.0,  # > $25
+            suggested_size_usd=8.0,  # > $6
             kelly_fraction=0.06, reasoning="test",
         )
         aprobado, _ = rm.aprobar_trade(
-            signal=signal, balance_actual=400.0,
+            signal=signal, balance_actual=50.0,
             exposicion_total=0.0, exposicion_mercado=0.0,
             exposicion_categoria=0.0, perdida_diaria=0.0,
             perdida_semanal=0.0, drawdown_actual=0.0,
@@ -97,11 +97,11 @@ class TestRiskManager:
     def test_rechazar_excede_exposicion_total(
         self, rm: RiskManager, signal_basica: TradeSignal
     ) -> None:
-        """Rechaza si excede exposición total (60% de 500 = $300)."""
+        """Rechaza si excede exposición total (70% de 60 = $42)."""
         aprobado, razon = rm.aprobar_trade(
             signal=signal_basica,
-            balance_actual=400.0,
-            exposicion_total=295.0,  # 295 + 10 = 305 > 300
+            balance_actual=50.0,
+            exposicion_total=39.0,  # 39 + 5 = 44 > 42
             exposicion_mercado=0.0,
             exposicion_categoria=0.0,
             perdida_diaria=0.0,
@@ -117,7 +117,7 @@ class TestRiskManager:
         """Rechaza si el drawdown supera el máximo (25%)."""
         aprobado, razon = rm.aprobar_trade(
             signal=signal_basica,
-            balance_actual=400.0,
+            balance_actual=50.0,
             exposicion_total=0.0,
             exposicion_mercado=0.0,
             exposicion_categoria=0.0,
@@ -134,11 +134,11 @@ class TestRiskManager:
         """Rechaza si se alcanzó el límite de pérdida diaria."""
         aprobado, _ = rm.aprobar_trade(
             signal=signal_basica,
-            balance_actual=400.0,
+            balance_actual=50.0,
             exposicion_total=0.0,
             exposicion_mercado=0.0,
             exposicion_categoria=0.0,
-            perdida_diaria=55.0,  # > 50 (10% de 500)
+            perdida_diaria=7.0,  # > 6 (10% de 60)
             perdida_semanal=0.0,
             drawdown_actual=0.0,
         )
@@ -150,7 +150,7 @@ class TestRiskManager:
         """Rechaza si ya hay órdenes pendientes en el mercado."""
         aprobado, razon = rm.aprobar_trade(
             signal=signal_basica,
-            balance_actual=400.0,
+            balance_actual=50.0,
             exposicion_total=0.0,
             exposicion_mercado=0.0,
             exposicion_categoria=0.0,
@@ -171,7 +171,7 @@ class TestRiskManager:
             suggested_size_usd=0.0, kelly_fraction=0.0, reasoning="test",
         )
         aprobado, _ = rm.aprobar_trade(
-            signal=signal, balance_actual=400.0,
+            signal=signal, balance_actual=50.0,
             exposicion_total=0.0, exposicion_mercado=0.0,
             exposicion_categoria=0.0, perdida_diaria=0.0,
             perdida_semanal=0.0, drawdown_actual=0.0,
@@ -272,8 +272,8 @@ class TestTradingStrategy:
 
         señal = strategy.generar_señal(ctx, ev)
 
-        # Max per trade = 5% de 500 = $25
-        assert señal.suggested_size_usd <= 25.0
+        # Max per trade = 10% de 60 = $6
+        assert señal.suggested_size_usd <= 6.0
 
     def test_prefiere_mejor_lado(
         self, strategy: TradingStrategy

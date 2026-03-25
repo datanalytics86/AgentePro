@@ -123,8 +123,8 @@ class CopyTradingConfig:
     leaderboard_window: str = _get_env("COPY_TRADING_WINDOW", "all")
     # Mínimo de top traders con posición para considerar consenso
     min_traders_consensus: int = int(_get_env("COPY_MIN_CONSENSUS", "3"))
-    # Tamaño base por trade como % del bankroll (3% = 0.03)
-    copy_size_pct: float = float(_get_env("COPY_SIZE_PCT", "0.03"))
+    # Tamaño base por trade como % del bankroll (5% = 0.05)
+    copy_size_pct: float = float(_get_env("COPY_SIZE_PCT", "0.05"))
     # Máximo nuevas posiciones por ciclo
     max_new_positions_per_cycle: int = int(_get_env("COPY_MAX_NEW_PER_CYCLE", "5"))
     # Precio máximo de entrada (no comprar tokens > 95%)
@@ -143,15 +143,15 @@ class CopyTradingConfig:
 class RiskConfig:
     """Reglas de gestión de riesgo INAMOVIBLES."""
     # Bankroll total disponible en USDC
-    max_bankroll_usd: float = float(_get_env("MAX_BANKROLL_USD", "500"))
+    max_bankroll_usd: float = float(_get_env("MAX_BANKROLL_USD", "60"))
     # Máximo por trade individual (% del bankroll)
-    max_per_trade_pct: float = float(_get_env("MAX_PER_TRADE_PCT", "0.05"))
+    max_per_trade_pct: float = float(_get_env("MAX_PER_TRADE_PCT", "0.10"))
     # Máximo en un solo mercado (% del bankroll)
-    max_per_market_pct: float = float(_get_env("MAX_PER_MARKET_PCT", "0.10"))
+    max_per_market_pct: float = float(_get_env("MAX_PER_MARKET_PCT", "0.15"))
     # Máximo en una categoría (% del bankroll)
-    max_per_category_pct: float = float(_get_env("MAX_PER_CATEGORY_PCT", "0.25"))
+    max_per_category_pct: float = float(_get_env("MAX_PER_CATEGORY_PCT", "0.35"))
     # Máximo total expuesto (% del bankroll)
-    max_exposure_pct: float = float(_get_env("MAX_EXPOSURE_PCT", "0.60"))
+    max_exposure_pct: float = float(_get_env("MAX_EXPOSURE_PCT", "0.70"))
     # Pérdida máxima diaria (% del bankroll)
     max_daily_loss_pct: float = float(_get_env("MAX_DAILY_LOSS_PCT", "0.10"))
     # Pérdida máxima semanal (% del bankroll)
